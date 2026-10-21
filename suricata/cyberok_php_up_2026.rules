@@ -70,3 +70,21 @@ alert http $EXTERNAL_NET any -> $HOME_NET $HTTP_PORTS (msg:"PHP-UP-2026 PHPSESSI
 # Legitimate forms rarely exceed 50 parts; >500 is a strong attack signal.
 # Matches on repeated Content-Disposition lines (each multipart part has one).
 alert http $EXTERNAL_NET any -> $HOME_NET $HTTP_PORTS (msg:"PHP-UP-2026 multipart part flood (>500 parts, heap grooming)"; flow:established,to_server; http.method; content:"POST"; http.request_body; pcre:"/(Content-Disposition\x3a form-data\x3b[^\r\n]{0,200}\r\n){500,}/"; classtype:attempted-dos; sid:1000006109; rev:1; metadata:created_at 2026_10_21, cve CVE-2026-109618;)
+
+# --- handler-mismatch seed: pipe-prefixed serialized payload in progress value ---
+# The exploit seeds "|O:4:\"Evil\":1:{...}" as the upload-progress value under
+# php_serialize (stored verbatim as session key); the fire request decodes it
+# under the php handler, splitting at "|" and running __destruct().
+alert http $EXTERNAL_NET any -> $HOME_NET $HTTP_PORTS (msg:"PHP-UP-2026 handler-mismatch seed: pipe+serialized in PHP_SESSION_UPLOAD_PROGRESS"; flow:established,to_server; http.method; content:"POST"; http.request_body; pcre:"/name=\"PHP_SESSION_UPLOAD_PROGRESS\"\r\n\r\n\|[a-zA-Z]/"; classtype:web-application-attack; sid:1000006110; rev:1; metadata:created_at 2026_10_21, cve CVE-2026-109619;)
+
+# --- response-side leak oracle: oversized/binary PHPSESSID cookie ---
+# The remote CVE chain leaks heap pointers (Zend MM chunk base, libphp base)
+# through Set-Cookie: PHPSESSID=<binary garbage>. A legitimate PHPSESSID is
+# 26-64 chars from [A-Za-z0-9,-]; >200 bytes or non-conforming bytes = leak.
+alert http $HOME_NET $HTTP_PORTS -> $EXTERNAL_NET any (msg:"PHP-UP-2026 CVE-2026-109618 Set-Cookie PHPSESSID leak oracle (oversized/binary)"; flow:established,to_client; http.response_line; content:"200"; http.set_cookie; content:"PHPSESSID="; pcre:"/Set-Cookie\x3a PHPSESSID=[^\r\n]{200,}/"; classtype:attempted-admin; sid:1000006111; rev:1; metadata:created_at 2026_10_21, cve CVE-2026-109618;)
+
+# --- 109618 arm: giant multipart filename (>64KB) ---
+# The arm stage sends filenames of 262,144 bytes to exhaust memory during
+# request parsing. Legitimate filenames rarely exceed 255 bytes; >4000 chars
+# is anomalous. (Threshold kept at 4000 to fit the ~4KB inspect window.)
+alert http $EXTERNAL_NET any -> $HOME_NET $HTTP_PORTS (msg:"PHP-UP-2026 CVE-2026-109618 giant multipart filename (>64KB, heap exhaustion arm)"; flow:established,to_server; http.method; content:"POST"; http.request_body; pcre:"/filename=\"[^\r\n]{4000,}/"; classtype:attempted-dos; sid:1000006112; rev:1; metadata:created_at 2026_10_21, cve CVE-2026-109618;)
