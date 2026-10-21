@@ -81,7 +81,7 @@ alert http $EXTERNAL_NET any -> $HOME_NET $HTTP_PORTS (msg:"PHP-UP-2026 handler-
 # The remote CVE chain leaks heap pointers (Zend MM chunk base, libphp base)
 # through Set-Cookie: PHPSESSID=<binary garbage>. A legitimate PHPSESSID is
 # 26-64 chars from [A-Za-z0-9,-]; >200 bytes or non-conforming bytes = leak.
-alert http $HOME_NET $HTTP_PORTS -> $EXTERNAL_NET any (msg:"PHP-UP-2026 CVE-2026-109618 Set-Cookie PHPSESSID leak oracle (oversized/binary)"; flow:established,to_client; http.response_line; content:"200"; http.set_cookie; content:"PHPSESSID="; pcre:"/Set-Cookie\x3a PHPSESSID=[^\r\n]{200,}/"; classtype:attempted-admin; sid:1000006111; rev:1; metadata:created_at 2026_10_21, cve CVE-2026-109618;)
+alert http $HOME_NET $HTTP_PORTS -> $EXTERNAL_NET any (msg:"PHP-UP-2026 CVE-2026-109618 Set-Cookie PHPSESSID leak oracle (oversized/binary)"; flow:established,to_client; http.response_header; content:"PHPSESSID="; pcre:"/Set-Cookie\x3a PHPSESSID=[^\r\n]{200,}/"; classtype:attempted-admin; sid:1000006111; rev:1; metadata:created_at 2026_10_21, cve CVE-2026-109618;)
 
 # --- 109618 arm: giant multipart filename (>64KB) ---
 # The arm stage sends filenames of 262,144 bytes to exhaust memory during
