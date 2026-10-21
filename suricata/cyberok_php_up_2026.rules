@@ -1,0 +1,72 @@
+# ------------------------------------------------------------------------
+# CyberOK — php2shell defense tools (CVE-2026-109618 / CVE-2026-109619)
+#
+# (c) 2026 АО «Сайбер ОК» / JSC CyberOK
+# Материал предоставляется исключительно для ознакомительных и исследовательских целей.
+# Копирование, переработка, распространение, переопубликация и использование материала
+# полностью или частично в коммерческих целях, включая создание и продвижение
+# конкурирующих продуктов, запрещены без предварительного письменного разрешения
+# правообладателя.
+#
+# Provided for informational and research purposes only. Copying, modification,
+# distribution, republication, and use of this material in whole or in part for
+# commercial purposes, including the creation and promotion of competing products,
+# is prohibited without the prior written permission of the copyright holder.
+# ------------------------------------------------------------------------
+
+# Suricata/Snort3-compatible rules — PHP-UP-2026 wave
+# CVE-2026-109618 (OOM corruption via bailout) + CVE-2026-109619 (stale global state,
+# session upload-progress consumer). Local SID space 1000006100-1000006199.
+#
+# Detection philosophy: the advisories' trigger surfaces are REQUEST SHAPES
+# (chunked multipart, part-header amplification, name/filename flooding) and
+# the upload-progress poisoning signatures (serialized objects / PHP open tags
+# in PHP_SESSION_UPLOAD_PROGRESS value or in a multipart filename). All rules
+# are alert-only by default — tune to drop after measuring your baselines.
+
+# --- CVE-2026-109618, vector A: multipart without a usable Content-Length -----
+# PHP's post_max_size check needs Content-Length; a chunked multipart POST
+# bypasses it while feeding the parser (advisory-confirmed vector).
+alert http $EXTERNAL_NET any -> $HOME_NET $HTTP_PORTS (msg:"PHP-UP-2026 CVE-2026-109618 chunked multipart POST (post_max_size bypass surface)"; flow:established,to_server; http.method; content:"POST"; http.header; content:"Content-Type|3a| multipart/form-data"; nocase; http.header; content:"Transfer-Encoding|3a| chunked"; nocase; http.header; content:!"Content-Length|3a|"; classtype:attempted-dos; sid:1000006101; rev:1; metadata:created_at 2026_10_21, cve CVE-2026-109618;)
+
+# --- CVE-2026-109618, vector B: part-header amplification ---------------------
+# A single multipart part carrying an abnormal number of headers: in-memory
+# representation far exceeds wire size, exhausting memory_limit inside
+# post_max_size (validated shape: 150k X-Pad headers).
+alert http $EXTERNAL_NET any -> $HOME_NET $HTTP_PORTS (msg:"PHP-UP-2026 CVE-2026-109618 multipart part-header amplification (100+)"; flow:established,to_server; http.method; content:"POST"; http.request_body; pcre:"/(\r\nX-[A-Za-z][A-Za-z0-9-]{0,31}\x3a[^\r\n]{0,256}){100,}/"; classtype:attempted-dos; sid:1000006102; rev:1; metadata:created_at 2026_10_21, cve CVE-2026-109618;)
+# generic variant: any part-header run of 100+ lines (not just X-*)
+alert http $EXTERNAL_NET any -> $HOME_NET $HTTP_PORTS (msg:"PHP-UP-2026 CVE-2026-109618 multipart header-run amplification (generic)"; flow:established,to_server; http.method; content:"POST"; http.request_body; pcre:"/(\r\n[A-Za-z][A-Za-z0-9-]{1,32}\x3a[^\r\n]{1,256}){200,}/"; classtype:attempted-dos; sid:1000006103; rev:1; metadata:created_at 2026_10_21, cve CVE-2026-109618;)
+
+# --- CVE-2026-109618, auxiliary shapes (upstream regression corpus) -----------
+# deeply nested variable names (a[][b][b]... 40+ levels)
+alert http $EXTERNAL_NET any -> $HOME_NET $HTTP_PORTS (msg:"PHP-UP-2026 CVE-2026-109618 deeply nested multipart/urlencoded names (40+)"; flow:established,to_server; http.method; content:"POST"; http.request_body; pcre:"/(name=\"[^\"]{0,64}(\[[^\]]{0,32}\]){40,}|[a-z][a-z0-9_]{0,32}(\[[^\]]{0,32}\]){40,}=)/"; classtype:attempted-dos; sid:1000006104; rev:2; metadata:created_at 2026_10_21, cve CVE-2026-109618;)
+# empty-file control flood (bypasses max_file_uploads accounting)
+# Suricata note: occurrence-COUNTING over variable-gap multipart units is
+# unreliable here (PCRE2 rejects the span; inspect windows split it) — this rule
+# fires on the unit signature; robust {50,} counting is done by the ModSecurity
+# companion rule (1006104). Tune severity to WARNING if you see benign empty
+# file controls (some multi-upload UIs send them one-by-one).
+alert http $EXTERNAL_NET any -> $HOME_NET $HTTP_PORTS (msg:"PHP-UP-2026 CVE-2026-109618 empty-filename file control (flood component, count in WAF)"; flow:established,to_server; http.method; content:"POST"; http.request_body; pcre:"/filename=\"\"\x0d\x0aContent-Type/"; classtype:attempted-dos; sid:1000006105; rev:3; metadata:created_at 2026_10_21, cve CVE-2026-109618;)
+
+# --- CVE-2026-109619: upload-progress poisoning signatures --------------------
+# serialized object / PHP open tag inside the PHP_SESSION_UPLOAD_PROGRESS value
+# (session-file poisoning: the value becomes a $_SESSION key verbatim)
+alert http $EXTERNAL_NET any -> $HOME_NET $HTTP_PORTS (msg:"PHP-UP-2026 CVE-2026-109619 serialized payload in PHP_SESSION_UPLOAD_PROGRESS (session poisoning)"; flow:established,to_server; http.method; content:"POST"; http.request_body; pcre:"/name=\"PHP_SESSION_UPLOAD_PROGRESS\"\r\n\r\n[^\r\n]{0,1024}?(<\x3f\x3d|<\x3fphp|O\x3a\d{1,5}\x3a\"|a\x3a\d{1,6}\x3a\{|\|[a-z]{1,4}\x3a)/"; classtype:web-application-attack; sid:1000006106; rev:1; metadata:created_at 2026_10_21, cve CVE-2026-109619;)
+# payload inside a multipart FILENAME (second carrier; the filename is stored
+# verbatim in the progress structure)
+alert http $EXTERNAL_NET any -> $HOME_NET $HTTP_PORTS (msg:"PHP-UP-2026 CVE-2026-109619 payload in multipart filename (upload-progress carrier)"; flow:established,to_server; http.method; content:"POST"; http.request_body; pcre:"/filename=\"[^\"]{0,512}?(<\x3f\x3d|<\x3fphp|O\x3a\d{1,5}\x3a\")/"; classtype:web-application-attack; sid:1000006107; rev:1; metadata:created_at 2026_10_21, cve CVE-2026-109619;)
+# session id injected as a multipart FORM FIELD (cookie-less sid control; never
+# legitimate — session ids travel in cookies/URL, not form fields).
+# Residual-surface note (verified 2026-10-21): form-SID ingestion SURVIVES the
+# 8.2.35 fix (with cleanup=0 the progress still lands in the chosen sess_<sid>)
+# — this rule stays relevant on PATCHED versions as the poisoning-enabler
+# signal (pairs with 1000006106/6107). Sid traversal NOT reachable here: the
+# [A-Za-z0-9,-] charset validator rejects it on both versions.
+alert http $EXTERNAL_NET any -> $HOME_NET $HTTP_PORTS (msg:"PHP-UP-2026 PHPSESSID supplied as multipart form field (sid injection)"; flow:established,to_server; http.method; content:"POST"; http.request_body; content:"name=\"PHPSESSID\""; nocase; classtype:web-application-attack; sid:1000006108; rev:1; metadata:created_at 2026_10_21, cve CVE-2026-109619;)
+
+# --- heap-grooming: multipart part flood (>500 parts) --------------------------
+# The CVE exploit chain (xue-poc/remote_cve.py) sends 1000+ parts per request
+# (3KB each + a 12MB "big" part ≈ 15MB per POST) to groom the ZendMM heap.
+# Legitimate forms rarely exceed 50 parts; >500 is a strong attack signal.
+# Matches on repeated Content-Disposition lines (each multipart part has one).
+alert http $EXTERNAL_NET any -> $HOME_NET $HTTP_PORTS (msg:"PHP-UP-2026 multipart part flood (>500 parts, heap grooming)"; flow:established,to_server; http.method; content:"POST"; http.request_body; pcre:"/(Content-Disposition\x3a form-data\x3b[^\r\n]{0,200}\r\n){500,}/"; classtype:attempted-dos; sid:1000006109; rev:1; metadata:created_at 2026_10_21, cve CVE-2026-109618;)
