@@ -154,57 +154,80 @@ def local_mode(php_cgi):
 
 # --------------------------------------------------------------- remote mode
 def remote_mode(url):
-    B = "----safecheck"
-    mp = (f"--{B}\r\n" + 'Content-Disposition: form-data; name="x"\r\n\r\n1\r\n'
-          + f"--{B}--\r\n").encode()
+    """
+    Remote behavioural check using the PortSwigger technique (Tom SL):
 
-    def post(ctype, body):
-        req = urllib.request.Request(url, data=body, method="POST",
-                                     headers={"Content-Type": ctype})
-        try:
-            with urllib.request.urlopen(req, timeout=20,
-                                        context=ssl.create_default_context()) as r:
-                return r.status
-        except urllib.error.HTTPError as e:
-            return e.code
-        except Exception as e:  # noqa: BLE001
-            return f"err:{e}"
+    Sends ONE POST with an invalid session ID (Cookie: PHPSESSID=_) and a
+    PHP_SESSION_UPLOAD_PROGRESS field. On a vulnerable build PHP prints
+    THREE warnings (illegal SID + failed read + failed write); the fix
+    removes the "Failed to write session data" warning — only unpatched
+    builds attempt to write the session after start-up fails.
 
-    root = None
+    Non-destructive, single request, no OOM, works on any PHP page.
+    """
+    import urllib.request
+    import urllib.error
+    import ssl
+    import uuid
+
+    boundary = "----" + uuid.uuid4().hex[:32]
+    token = uuid.uuid4().hex[:20]
+    fname = uuid.uuid4().hex[:12] + ".txt"
+    body = (f"--{boundary}\r\n"
+            'Content-Disposition: form-data; name="PHP_SESSION_UPLOAD_PROGRESS"\r\n\r\n'
+            f"{token}\r\n"
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="f"; filename="{fname}"\r\n'
+            "Content-Type: text/plain\r\n\r\n1\r\n"
+            f"--{boundary}--\r\n").encode()
+
+    req = urllib.request.Request(
+        url, data=body, method="POST",
+        headers={
+            "Cookie": "PHPSESSID=_",
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+        })
     try:
-        with urllib.request.urlopen(url, timeout=20,
+        with urllib.request.urlopen(req, timeout=20,
                                     context=ssl.create_default_context()) as r:
-            root = r.status
-    except Exception:  # noqa: BLE001
-        root = "err"
-    c1 = post("application/x-www-form-urlencoded", b"a=1")
-    c2 = post(f"multipart/form-data; boundary={B}", mp)
-    print(f"root={root} urlencoded={c1} multipart={c2}")
+            status, resp_body = r.status, r.read(16384).decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        status = e.code
+        resp_body = e.read(16384).decode("utf-8", "replace")
+    except Exception as e:  # noqa: BLE001
+        print(f"INCONCLUSIVE: target unreachable: {e}")
+        return 2
 
-    # NOTE: 403/404 alone is NOT proof of edge-level rejection — the PHP
-    # application itself can return these codes AFTER parsing the body.
-    # The only reliable signal is when the status differs between a trivial
-    # urlencoded POST (c1) and an identical multipart POST (c2).
-    if c2 in {403} and c1 not in {403}:
-        print("POSSIBLY-MITIGATED: multipart specifically rejected (403) while "
-              "urlencoded passes — but this could also be application routing. "
-              "Verify at the origin (php -v or LOCAL mode).")
+    print(f"probe: POST {url} -> HTTP {status}")
+    print(f"response ({len(resp_body)}B): {resp_body[:300]!r}")
+
+    # The three-warning signature (PortSwigger / Tom SL)
+    w1 = "Session ID is too long or contains illegal characters" in resp_body
+    w2 = "Failed to read session data" in resp_body
+    w3 = "Failed to write session data (" in resp_body
+
+    print(f"  illegal-SID warning:  {w1}")
+    print(f"  failed-read warning:  {w2}")
+    print(f"  failed-write warning: {w3}  (present only on unpatched builds)")
+
+    if w1 and w2 and w3:
+        print("VULNERABLE: PHP attempted to write the session after start-up "
+              "failed — behaviour removed by the fix (CVE-2026-109618/109619).")
+        print("VERSION: signal present ⇒ build predates the fix — patched in "
+              "8.2.35 / 8.3.36 / 8.4.27 / 8.5.12. CVSS v4.0: 9.2.")
+        return 1
+    if w1 and w2:
+        print("PATCHED: PHP reached session start-up and correctly rejected the "
+              "invalid SID, but did NOT attempt to write the session — "
+              "the fix is present (8.2.35+ / 8.3.36+ / 8.4.27+ / 8.5.12+).")
         return 0
-    if isinstance(c1, int) and isinstance(c2, int) and (c2 < 500) and (c1 < 500):
-        print("SURFACE-EXPOSED: PHP (or a parser) consumed the POSTs pre-auth. "
-              "This is reachability only — NOT a vulnerability verdict; the "
-              "decisive check is LOCAL mode against the origin php-cgi binary "
-              f"or `php -v` (fix: {FIXED}).")
-        return 1
-    print("INCONCLUSIVE: unexpected responses.")
-    return 2
-    if isinstance(c1, int) and isinstance(c2, int) and (c2 < 500) and (c1 < 500):
-        print("SURFACE-EXPOSED: PHP (or a parser) consumed the POSTs pre-auth. "
-              "This is reachability only — NOT a vulnerability verdict; the "
-              "decisive check is LOCAL mode against the origin php-cgi binary "
-              f"or `php -v` (fix: {FIXED}).")
-        return 1
-    print("INCONCLUSIVE: unexpected responses.")
+    if status == 200 and not (w1 or w2 or w3):
+        print("INCONCLUSIVE: response contains no PHP session warnings. The "
+              "target may not expose PHP errors (display_errors=Off), or may "
+              "not be PHP, or a WAF stripped the response. Try LOCAL mode "
+              "with --php-cgi for a definitive binary-level check.")
+        return 2
+    print("INCONCLUSIVE: unexpected response pattern.")
     return 2
 
 
