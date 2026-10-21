@@ -14,7 +14,8 @@ Updating is the only complete fix; these tools help you **verify** and **detect*
 |---|---|
 | `safechecks/cyberok_safecheck_cve_2026_109618.py` | Behavioural safe-check for CVE-2026-109618: drives a throwaway `php-cgi` with the official request-parsing OOM shapes and returns a verdict (pre-fix bailout window vs patched soft-OOM). Validated: 8.2.34 → AFFECTED (rc 1), 8.2.35 → SAFE (rc 0). |
 | `safechecks/cyberok_safecheck_cve_2026_109619.py` | Behavioural safe-check for CVE-2026-109619: poisoned session record + one multipart POST against a throwaway single-worker `php -S`; detects the pre-RINIT `unserialize_callback_func` invocation (the user-code gap the fix closes). Validated: 8.2.34 → VULNERABLE (rc 1), 8.2.35 → SAFE (rc 0). |
-| `suricata/cyberok_php_up_2026.rules` | 8 Suricata (Snort3-adaptable) signatures: chunked-multipart bypass, part-header amplification, deeply nested names, empty file controls, upload-progress poisoning (serialized payload / PHP tag in value and filename), PHPSESSID-as-form-field. Validated on replayed real trigger traffic: 7/7 fire, clean control silent. |
+| `safechecks/cyberok_safecheck_postpatch_surface.py` | **Post-patch surface check** (NOT a CVE test): verifies whether your PHP configuration remains exposed to the session-poisoning surface that SURVIVES the CVE fix. Tests: form-SID ingestion, progress-key persistence (cleanup=0/cleanup=1), handler mismatch. Validated: SURFACE EXPOSED on both 8.2.34 AND 8.2.35 (the form-SID path survives by design). Mitigation: `session.upload_progress.enabled = 0`. |
+| `suricata/cyberok_php_up_2026.rules` | 12 Suricata (Snort3-adaptable) signatures: chunked-multipart bypass, part-header amplification, deeply nested names, empty file controls, upload-progress poisoning (serialized payload / PHP tag in value and filename), PHPSESSID-as-form-field, handler-mismatch seed (`\|O:`), Set-Cookie leak oracle, giant filename, part flood. Validated on replayed real trigger traffic. |
 | `modsecurity/cyberok_php_up_2026.conf` | ModSecurity v2/v3 companion: the same surfaces on parsed variables (`ARGS`, `FILES_NAMES`, `ARGS_NAMES`) plus robust occurrence counting for the empty-filename flood (kept in the WAF layer — see notes). Desk-verified; burn in `DetectionOnly` before blocking. |
 | `LICENSE` | Copyright and usage notice (RU + EN). |
 
@@ -24,6 +25,9 @@ Updating is the only complete fix; these tools help you **verify** and **detect*
 # Local, decisive (run on the origin host; touches only throwaway processes):
 python3 safechecks/cyberok_safecheck_cve_2026_109618.py --php-cgi /usr/bin/php-cgi
 python3 safechecks/cyberok_safecheck_cve_2026_109619.py --php-cli /usr/bin/php
+
+# Post-patch surface check (config exposure — works on all versions):
+python3 safechecks/cyberok_safecheck_postpatch_surface.py --php-cli /usr/bin/php
 
 # Remote surface mode (109618 safe-check only — reachability, not a version verdict):
 python3 safechecks/cyberok_safecheck_cve_2026_109618.py --url https://host/
