@@ -101,3 +101,27 @@ alert http $EXTERNAL_NET any -> $HOME_NET $HTTP_PORTS (msg:"PHP-UP-2026 anomaly:
 # Values containing other characters (underscore, null, binary, etc.) are
 # crafted probes — the PortSwigger technique uses PHPSESSID=_ specifically.
 alert http $EXTERNAL_NET any -> $HOME_NET $HTTP_PORTS (msg:"PHP-UP-2026 invalid PHPSESSID cookie value (charset violation)"; flow:established,to_server; http.header; content:"PHPSESSID="; pcre:"/Cookie\x3a[^\r\n]*PHPSESSID=[^\s;\r\n]*[^a-zA-Z0-9,\-\s;\r\n]/"; classtype:web-application-attack; sid:1000006114; rev:1; metadata:created_at 2026_10_22, cve CVE-2026-109618;)
+
+# --- LFI trigger: session-file path in URI (ikow 2026106 + rafalohaki paths) ---
+# Every poisoning chain needs an application-level include/LFI that accepts
+# the session-file path. Common save_paths: /tmp, /var/lib/php/sessions,
+# /var/www/sess, /tmp/sess. Param names: tpl, template, view, page, file.
+alert http $EXTERNAL_NET any -> $HOME_NET $HTTP_PORTS (msg:"PHP-UP-2026 session-file path in URI (LFI trigger for poisoning chain)"; flow:established,to_server; http.uri; pcre:"/(?:\/(?:tmp|var\/lib\/php|var\/www)\/(?:sessions?\/|sess\/)?|\/tmp\/)sess_[A-Za-z0-9,-]{6,}/i"; classtype:web-application-attack; sid:1000006115; rev:1; metadata:created_at 2026_10_22;)
+
+# --- response-side: OOM success indicator (ikow 2026110) ---
+# "Allowed memory size of X bytes exhausted" in the response body — evidence
+# that the OOM arm reached PHP's request parser during startup.
+alert http $HOME_NET $HTTP_PORTS -> $EXTERNAL_NET any (msg:"PHP-UP-2026 CVE-2026-109618 OOM in response (memory exhausted during request parsing)"; flow:established,to_client; http.response_body; content:"Allowed memory size"; content:"exhausted"; distance:0; within:64; classtype:attempted-dos; sid:1000006116; rev:1; metadata:created_at 2026_10_22, cve CVE-2026-109618;)
+
+# --- response-side: session object destruction failed (ikow 2026111) ---
+# Direct evidence of CVE-2026-109619 stale-state consumption — the session
+# decode in the pre-RINIT path encountered corrupted/unreadable data.
+alert http $HOME_NET $HTTP_PORTS -> $EXTERNAL_NET any (msg:"PHP-UP-2026 CVE-2026-109619 session destruction failure in response (stale state consumed)"; flow:established,to_client; http.response_body; content:"Session object destruction failed"; classtype:attempted-admin; sid:1000006117; rev:1; metadata:created_at 2026_10_22, cve CVE-2026-109619;)
+
+# --- response-side: failed to decode session object (sibling of 6117) ---
+alert http $HOME_NET $HTTP_PORTS -> $EXTERNAL_NET any (msg:"PHP-UP-2026 CVE-2026-109619 failed session decode in response"; flow:established,to_client; http.response_body; content:"Failed to decode session object"; classtype:attempted-admin; sid:1000006118; rev:1; metadata:created_at 2026_10_22, cve CVE-2026-109619;)
+
+# --- post-exploit IoCs (rafalohaki) ---
+# Default webshell names and response markers from the 8512 chain
+alert http $EXTERNAL_NET any -> $HOME_NET $HTTP_PORTS (msg:"PHP-UP-2026 post-exploit IoC: php2shell webshell access"; flow:established,to_server; http.uri; content:"p2s_8512_shell.php"; classtype:successful-admin; sid:1000006119; rev:1; metadata:created_at 2026_10_22;)
+alert http $HOME_NET $HTTP_PORTS -> $EXTERNAL_NET any (msg:"PHP-UP-2026 post-exploit IoC: SHELL_ALIVE marker in response"; flow:established,to_client; http.response_body; content:"SHELL_ALIVE"; classtype:successful-admin; sid:1000006120; rev:1; metadata:created_at 2026_10_22;)

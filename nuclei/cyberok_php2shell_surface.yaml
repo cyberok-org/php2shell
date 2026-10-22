@@ -1,0 +1,146 @@
+id: cyberok-php2shell-surface
+
+info:
+  name: CyberOK php2shell attack surface + post-exploit detection
+  author: CyberOK
+  severity: high
+  description: |
+    Multi-check template covering the php2shell attack surface beyond the
+    behavioural detection (see cyberok_php2shell_detect.yaml):
+
+    1. Version-based: reads X-Powered-By for PHP version, checks against
+       patched releases (8.2.35/8.3.36/8.4.27/8.5.12).
+    2. LFI trigger: checks if the target exposes a parameter that accepts
+       a session-file path (tpl/template/view/page/file → /tmp/sess_*).
+    3. Post-exploit IoCs: webshell access (p2s_8512_shell.php) and
+       response markers (SHELL_ALIVE, PAYLOAD_PERSISTED).
+
+    Combine with cyberok_php2shell_detect.yaml for full coverage.
+  reference:
+    - https://github.com/php/php-src/security/advisories/GHSA-w8hw-w9fx-j79w
+    - https://github.com/php/php-src/security/advisories/GHSA-6wmf-4rv5-p3rp
+    - https://github.com/cyberok-org/php2shell
+  tags: php,rce,cve-2026,cyberok,surface,lfi
+
+http:
+  # --- Check 1: version-based from response headers ---
+  - raw:
+      - |
+        GET / HTTP/1.1
+        Host: {{Hostname}}
+
+    matchers-condition: or
+    matchers:
+      - type: word
+        part: header
+        words:
+          - "PHP/8.2.0"
+          - "PHP/8.2.1"
+          - "PHP/8.2.2"
+          - "PHP/8.2.3"
+          - "PHP/8.2.4"
+          - "PHP/8.2.5"
+          - "PHP/8.2.6"
+          - "PHP/8.2.7"
+          - "PHP/8.2.8"
+          - "PHP/8.2.9"
+          - "PHP/8.2.10"
+          - "PHP/8.2.11"
+          - "PHP/8.2.12"
+          - "PHP/8.2.13"
+          - "PHP/8.2.14"
+          - "PHP/8.2.15"
+          - "PHP/8.2.16"
+          - "PHP/8.2.17"
+          - "PHP/8.2.18"
+          - "PHP/8.2.19"
+          - "PHP/8.2.20"
+          - "PHP/8.2.21"
+          - "PHP/8.2.22"
+          - "PHP/8.2.23"
+          - "PHP/8.2.24"
+          - "PHP/8.2.25"
+          - "PHP/8.2.26"
+          - "PHP/8.2.27"
+          - "PHP/8.2.28"
+          - "PHP/8.2.29"
+          - "PHP/8.2.30"
+          - "PHP/8.2.31"
+          - "PHP/8.2.32"
+          - "PHP/8.2.33"
+          - "PHP/8.2.34"
+        condition: or
+
+  # --- Check 2: LFI trigger (session-file path in common params) ---
+  - raw:
+      - |
+        GET /?tpl=/tmp/sess_test HTTP/1.1
+        Host: {{Hostname}}
+
+      - |
+        GET /?template=/tmp/sess_test HTTP/1.1
+        Host: {{Hostname}}
+
+      - |
+        GET /?view=/tmp/sess_test HTTP/1.1
+        Host: {{Hostname}}
+
+      - |
+        GET /?page=/tmp/sess_test HTTP/1.1
+        Host: {{Hostname}}
+
+      - |
+        GET /?file=/tmp/sess_test HTTP/1.1
+        Host: {{Hostname}}
+
+    stop-at-first-match: false
+
+    matchers:
+      - type: word
+        part: body
+        words:
+          - "upload_progress_"
+          - "sess_"
+          - "start_time"
+        condition: or
+
+  # --- Check 3: post-exploit webshell IoC ---
+  - raw:
+      - |
+        GET /p2s_8512_shell.php HTTP/1.1
+        Host: {{Hostname}}
+
+    matchers:
+      - type: word
+        part: body
+        words:
+          - "SHELL_ALIVE"
+          - "PAYLOAD_PERSISTED"
+        condition: or
+
+  # --- Check 4: response-side session decode failure ---
+  - raw:
+      - |
+        POST / HTTP/1.1
+        Host: {{Hostname}}
+        Cookie: PHPSESSID=_
+        Content-Type: multipart/form-data; boundary=----x
+
+        ----x
+        Content-Disposition: form-data; name="PHP_SESSION_UPLOAD_PROGRESS"
+
+        test
+        ----x
+        Content-Disposition: form-data; name="f"; filename="a.txt"
+        Content-Type: text/plain
+
+        1
+        ----x--
+
+    matchers:
+      - type: word
+        part: body
+        words:
+          - "Session object destruction failed"
+          - "Failed to decode session object"
+        condition: or
