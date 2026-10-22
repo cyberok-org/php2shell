@@ -1,0 +1,82 @@
+id: cyberok-php2shell-behavioural
+
+info:
+  name: CyberOK php2shell behavioural detection (CVE-2026-109618/109619)
+  author: CyberOK
+  severity: critical
+  description: |
+    Non-destructive behavioural check for the PHP "php2shell" vulnerabilities
+    (CVE-2026-109618, CVE-2026-109619, CVSS v4.0 9.2).
+
+    Technique: sends ONE POST with an invalid session ID (Cookie: PHPSESSID=_)
+    and a PHP_SESSION_UPLOAD_PROGRESS field. On a vulnerable build PHP prints
+    THREE warnings including "Failed to write session data" — behaviour the
+    fix removes. On a patched build only two warnings appear.
+
+    Credit: the invalid-SID technique is from PortSwigger's BCheck by Tom SL.
+    The phpMyAdmin retest path is from Assetnote's scanner.
+
+    Affected: PHP 8.2 < 8.2.35, 8.3 < 8.3.36, 8.4 < 8.4.27, 8.5 < 8.5.12.
+  reference:
+    - https://github.com/php/php-src/security/advisories/GHSA-w8hw-w9fx-j79w
+    - https://github.com/php/php-src/security/advisories/GHSA-6wmf-4rv5-p3rp
+    - https://github.com/cyberok-org/php2shell
+  classification:
+    cvss-metrics: CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:H/VI:H/VA:H
+    cvss-score: 9.2
+    cve-id: CVE-2026-109618,CVE-2026-109619
+  tags: php,rce,cve-2026,cyberok
+
+variables:
+  boundary: "----cyberok{{randstr(16)}}"
+
+http:
+  - raw:
+      - |
+        POST /{{path}} HTTP/1.1
+        Host: {{Hostname}}
+        Cookie: PHPSESSID=_
+        Content-Type: multipart/form-data; boundary={{boundary}}
+
+        --{{boundary}}
+        Content-Disposition: form-data; name="PHP_SESSION_UPLOAD_PROGRESS"
+
+        {{randstr(20)}}
+        --{{boundary}}
+        Content-Disposition: form-data; name="f"; filename="{{randstr(8)}}.txt"
+        Content-Type: text/plain
+
+        1
+        --{{boundary}}--
+
+    payloads:
+      path:
+        - ""
+        - "index.php"
+        - "show_config_errors.php"
+
+    stop-at-first-match: false
+
+    matchers-condition: and
+    matchers:
+      - type: word
+        part: body
+        words:
+          - "Session ID is too long or contains illegal characters"
+          - "Failed to read session data"
+          - "Failed to write session data"
+        condition: and
+
+    extractors:
+      - type: regex
+        name: php_version
+        part: header
+        regex:
+          - 'PHP/(\d+\.\d+\.\d+)'
+        internal: true
+
+      - type: regex
+        name: matched_path
+        part: body
+        regex:
+          - '(Failed to write session data)'
