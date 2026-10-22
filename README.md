@@ -13,8 +13,8 @@ Updating is the only complete fix; these tools help you **verify** and **detect*
 | Component | Files | Description |
 |---|---|---|
 | **Safechecks** | 3 Python scripts | Behavioural vulnerability checks (local + remote + bulk scan). See [`safechecks/README.md`](safechecks/README.md) for full documentation. |
-| **Suricata** | 1 rules file (14 signatures) | HTTP request/response signatures for Snort/Suricata. Validated on real exploit traffic (mod_php + FPM). |
-| **ModSecurity** | 1 config file (18 rules) | WAF rules on parsed variables. Includes response-side behavioural detection and SAPI-specific crash-signal documentation. |
+| **Suricata** | 1 rules file (20 signatures) | HTTP request/response signatures for Snort/Suricata. Validated on real exploit traffic (mod_php + FPM). |
+| **ModSecurity** | 1 config file (23 rules) | WAF rules on parsed variables. Includes response-side behavioural detection and SAPI-specific crash-signal documentation. |
 | **Nuclei** | 1 template | Non-destructive behavioural detection with multi-path payloads. |
 
 ## Quick start
@@ -84,12 +84,19 @@ nuclei -t nuclei/cyberok_php2shell_detect.yaml -u https://target/
 | 6112 | Giant multipart filename (>4000 chars) | 109618 arm |
 | 6113 | UPLOAD_PROGRESS field present (anomaly) | Generic |
 | 6114 | Invalid PHPSESSID cookie (charset) | Generic |
+| 6115 | Session-file path in URI (LFI trigger) | 109619 (include/LFI sink) |
+| 6116 | OOM in response body | 109618 (response-side, vulnerable only) |
+| 6117 | Session destruction failed in response | 109619 (response-side, vulnerable only) |
+| 6118 | Failed to decode session object | 109619 (response-side) |
+| 6119 | Post-exploit webshell access (p2s_*) | Post-exploit IoC |
+| 6120 | Post-exploit marker (SHELL_ALIVE) | Post-exploit IoC |
 
 ### ModSecurity rules (18)
 
 Request-side (phase 1–2): matching Suricata coverage on parsed variables +
-robust occurrence counting. Response-side (phase 3): behavioural detection
-via three-warning signature. Includes SAPI-specific crash-signal taxonomy
+robust occurrence counting. Response-side (phase 3/4): behavioural detection
+via three-warning signature, OOM indicator, session-decode failure, and
+post-exploit markers. Includes SAPI-specific crash-signal taxonomy
 (mod_php vs FPM) and rejected-statuses troubleshooting guide.
 
 ## Detection notes
@@ -120,8 +127,10 @@ via three-warning signature. Includes SAPI-specific crash-signal taxonomy
 | Bulk scan (2 targets, JSON) | Correct: 1 vulnerable + 1 patched |
 | Suricata vs mod_php traffic | 9/10 request signatures fired, control silent |
 | Suricata vs FPM traffic | 9/10 fired, control silent |
+| Suricata new rules on FPM (6115-6120) | 4/6 fired (LFI, webshell IoC, 8512-seed, anomaly); 2 response-side need vulnerable build |
 | ModSecurity patterns | Desk-verified against exact trigger bytes |
 | phpMyAdmin retest | Technique validated (Assetnote) |
+| ikow rules comparison | 10/12 covered by our set; 2 gaps (threshold-recon, version-inventory) noted |
 
 ## References
 
