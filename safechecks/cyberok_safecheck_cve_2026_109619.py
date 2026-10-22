@@ -123,6 +123,13 @@ def local_mode(php_cli):
     # PHP >= 8.1 prints "PHP Request Startup:", PHP 8.0 prints "Unknown:"
     fired = MARKER_TAIL in combined and (
         b"Request Startup" in combined or b"Unknown:" in combined)
+    # PHP <= 7.4: unserialize_callback_func is invoked with the class-name
+    # string and var_dump prints it into the response body instead of
+    # emitting a startup warning — that output is the callback-fired signal.
+    # (Verified: 7.4.33/7.3.33/7.2.34/7.0.33/5.6.40 all print
+    #  string(8) "SC109619" twice, i.e. they are VULNERABLE, not fixed.)
+    if not fired and (b'"%s"' % CLS.encode()) in out:
+        fired = True
     print("startup-callback-fired:", fired)
     for line in combined.splitlines():
         if b"Request Startup" in line or b"Unknown:" in line or b"hasn't defined" in line:
@@ -193,11 +200,15 @@ def main():
             result["reason"] = f"unreachable: {e}"
             return result
 
-        w1 = "Session ID is too long" in resp
-        w2 = "Failed to read session data" in resp
-        w3 = "Failed to write session data (" in resp
+        low = resp.lower()
+        # w1 text: "Session ID ..." (>= 8.0) vs "The session id ..." (7.x / 5.6)
+        w1 = "session id is too long or contains illegal characters" in low
+        w2 = "failed to read session data" in low
+        # w3 is decisive; on 5.6 w2 never fires, so it is not required.
+        # On PHP <= 7.4 the warnings appear only with display_startup_errors=On.
+        w3 = "failed to write session data (" in low
 
-        if w1 and w2 and w3:
+        if w1 and w3:
             result["verdict"] = "VULNERABLE"
             result["exit_code"] = 1
             result["reason"] = "unpatched PHP attempted session write after start-up failure"

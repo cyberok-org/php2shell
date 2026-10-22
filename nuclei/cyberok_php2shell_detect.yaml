@@ -17,6 +17,9 @@ info:
     The phpMyAdmin retest path is from Assetnote's scanner.
 
     Affected: PHP 8.2 < 8.2.35, 8.3 < 8.3.36, 8.4 < 8.4.27, 8.5 < 8.5.12.
+    All EOL branches (5.6 through 8.1) are affected as well — verified by
+    direct testing against 5.6.40 / 7.0.33 / 7.2.34 / 7.3.33 / 7.4.33 /
+    8.0.30 / 8.1.34.
   reference:
     - https://github.com/php/php-src/security/advisories/GHSA-w8hw-w9fx-j79w
     - https://github.com/php/php-src/security/advisories/GHSA-6wmf-4rv5-p3rp
@@ -28,7 +31,7 @@ info:
   tags: php,rce,cve-2026,cyberok
 
 variables:
-  boundary: "----cyberok{{randstr(16)}}"
+  boundary: "----cyberok{{rand_base(16)}}"
 
 http:
   - raw:
@@ -41,9 +44,9 @@ http:
         --{{boundary}}
         Content-Disposition: form-data; name="PHP_SESSION_UPLOAD_PROGRESS"
 
-        {{randstr(20)}}
+        {{rand_base(20)}}
         --{{boundary}}
-        Content-Disposition: form-data; name="f"; filename="{{randstr(8)}}.txt"
+        Content-Disposition: form-data; name="f"; filename="{{rand_base(8)}}.txt"
         Content-Type: text/plain
 
         1
@@ -59,13 +62,22 @@ http:
 
     matchers-condition: and
     matchers:
+      # w1 text differs across PHP generations ("Session ID ..." >= 8.0 vs
+      # "The session id ..." on 7.x/5.6) — match case-insensitively.
       - type: word
         part: body
+        case-insensitive: true
         words:
-          - "Session ID is too long or contains illegal characters"
-          - "Failed to read session data"
-          - "Failed to write session data"
-        condition: and
+          - "session id is too long or contains illegal characters"
+      # w3 is the decisive signal (unpatched attempts the write after the
+      # start-up failure). On 5.6 the read-failure warning never fires, so
+      # it is intentionally NOT required. On PHP <= 7.4 these RINIT-time
+      # warnings reach the response only with display_startup_errors=On.
+      - type: word
+        part: body
+        case-insensitive: true
+        words:
+          - "failed to write session data"
 
     extractors:
       - type: regex

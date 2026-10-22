@@ -126,14 +126,21 @@ def remote_check(url, verbose=True):
             result["retested_at"] = pma_url
 
     resp_text = body.decode("utf-8", "replace")
-    w1 = "Session ID is too long or contains illegal characters" in resp_text
-    w2 = "Failed to read session data" in resp_text
-    w3 = "Failed to write session data (" in resp_text
+    low = resp_text.lower()
+    # w1 text differs across PHP generations: "Session ID ..." (>= 8.0) vs
+    # "The session id ..." (7.x / 5.6) — match case-insensitively.
+    w1 = "session id is too long or contains illegal characters" in low
+    w2 = "failed to read session data" in low
+    # w3 is the decisive signal: unpatched PHP attempts the session write
+    # after start-up failure. On 5.6 w2 never fires, so do not require it.
+    # NOTE: on PHP <= 7.4 these warnings reach the response only when the
+    # target runs display_startup_errors=On (they are RINIT-time warnings).
+    w3 = "failed to write session data (" in low
 
-    if w1 and w2 and w3:
+    if w1 and w3:
         result["verdict"] = "VULNERABLE"
         result["exit_code"] = 1
-        result["reason"] = ("three-warning signature: unpatched PHP attempted "
+        result["reason"] = ("write-after-failure signature: unpatched PHP attempted "
                            "session write after start-up failure")
     elif w1 and w2:
         result["verdict"] = "PATCHED"

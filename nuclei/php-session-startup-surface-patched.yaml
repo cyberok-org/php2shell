@@ -1,0 +1,66 @@
+id: php-session-startup-surface-patched
+
+info:
+  name: PHP session startup surface present, write suppressed (patched or mitigated)
+  author: cyberok-reproof
+  severity: info
+  description: >
+    Companion check to cve-2026-109618-109619-unpatched. The illegal-SID
+    probe reached the PHP session handler (illegal-SID warning present)
+    but the write-after-failure warning is absent: the target either runs
+    a patched PHP (incomplete-classes-only gate, 8.2.35+/8.3.x/8.4.x or a
+    distro backport) or suppresses the write another way. On PHP 5.6 the
+    read-failure warning never fires even when unpatched, so this template
+    must NOT be treated as a clean bill of health for EOL branches.
+  reference:
+    - https://github.com/scadastrangelove/php2shell/
+  tags: php,safecheck,session
+
+http:
+  - raw:
+      - |
+        POST /{{path}} HTTP/1.1
+        Host: {{Hostname}}
+        Cookie: PHPSESSID=_
+        Content-Type: multipart/form-data; boundary=----nkp2s
+        Content-Length: 251
+
+        ------nkp2s
+        Content-Disposition: form-data; name="PHP_SESSION_UPLOAD_PROGRESS"
+
+        probe
+        ------nkp2s
+        Content-Disposition: form-data; name="f"; filename="a.txt"
+        Content-Type: text/plain
+
+        1
+        ------nkp2s--
+
+    payloads:
+      path:
+        - ""
+        - "index.php"
+        - "show_config_errors.php"
+
+    stop-at-first-match: true
+
+    matchers-condition: and
+    matchers:
+      - type: word
+        part: body
+        case-insensitive: true
+        words:
+          - "session id is too long or contains illegal characters"
+
+      - type: word
+        part: body
+        case-insensitive: true
+        negative: true
+        words:
+          - "failed to write session data ("
+
+    extractors:
+      - type: kval
+        part: header
+        kval:
+          - x_powered_by
