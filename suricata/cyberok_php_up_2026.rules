@@ -88,3 +88,16 @@ alert http $HOME_NET $HTTP_PORTS -> $EXTERNAL_NET any (msg:"PHP-UP-2026 CVE-2026
 # request parsing. Legitimate filenames rarely exceed 255 bytes; >4000 chars
 # is anomalous. (Threshold kept at 4000 to fit the ~4KB inspect window.)
 alert http $EXTERNAL_NET any -> $HOME_NET $HTTP_PORTS (msg:"PHP-UP-2026 CVE-2026-109618 giant multipart filename (>64KB, heap exhaustion arm)"; flow:established,to_server; http.method; content:"POST"; http.request_body; pcre:"/filename=\"[^\r\n]{4000,}/"; classtype:attempted-dos; sid:1000006112; rev:1; metadata:created_at 2026_10_21, cve CVE-2026-109618;)
+
+# --- generic anomaly: PHP_SESSION_UPLOAD_PROGRESS field present at all -------
+# The upload-progress mechanism is PHP-internal; applications rarely expose
+# it in legitimate forms. Any request carrying this field is at minimum
+# anomalous, at worst part of an attack chain (poisoning/leak/ASLR bypass).
+# Low severity — tune to your application's baseline.
+alert http $EXTERNAL_NET any -> $HOME_NET $HTTP_PORTS (msg:"PHP-UP-2026 anomaly: PHP_SESSION_UPLOAD_PROGRESS field present in request"; flow:established,to_server; http.method; content:"POST"; http.request_body; content:"PHP_SESSION_UPLOAD_PROGRESS"; nocase; classtype:web-application-activity; sid:1000006113; rev:1; metadata:created_at 2026_10_22, cve CVE-2026-109618;)
+
+# --- invalid PHPSESSID value in Cookie header --------------------------------
+# PHP session IDs use [a-zA-Z0-9,-] charset (default: 32 hex chars).
+# Values containing other characters (underscore, null, binary, etc.) are
+# crafted probes — the PortSwigger technique uses PHPSESSID=_ specifically.
+alert http $EXTERNAL_NET any -> $HOME_NET $HTTP_PORTS (msg:"PHP-UP-2026 invalid PHPSESSID cookie value (charset violation)"; flow:established,to_server; http.header; content:"PHPSESSID="; pcre:"/Cookie\x3a[^\r\n]*PHPSESSID=[^\s;\r\n]*[^a-zA-Z0-9,\-\s;\r\n]/"; classtype:web-application-attack; sid:1000006114; rev:1; metadata:created_at 2026_10_22, cve CVE-2026-109618;)
