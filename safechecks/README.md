@@ -40,17 +40,18 @@ python3 cyberok_safecheck_postpatch_surface.py --php-cli /usr/bin/php
 (`Cookie: PHPSESSID=_`) and a `PHP_SESSION_UPLOAD_PROGRESS` field.
 
 **Detection** (PortSwigger technique, credit: Tom SL): on a vulnerable build
-PHP prints THREE warnings in the response; the fix removes the third.
+PHP emits a session write-after-failure warning in the response; the fix
+removes the write attempt.
 
 | Warning | Vulnerable | Patched |
 |---|---|---|
-| "Session ID is too long or contains illegal characters" | ✓ | ✓ |
-| "Failed to read session data" | ✓ | ✓ |
-| "Failed to write session data (" | **✓** | **✗** |
+| w1 "session id is too long or contains illegal characters" (case-insensitive; text is "The session id…" on 7.x/5.6) | ✓ | ✓ |
+| w2 "Failed to read session data" | ✓ (never fires on 5.6) | ✓ |
+| w3 "Failed to write session data (" | **✓ (decisive)** | **✗** |
 
 **Verdicts**:
-- `VULNERABLE` — three-warning signature present (rc=1)
-- `PATCHED` — two warnings without the write attempt (rc=0)
+- `VULNERABLE` — w1 + w3 signature present (rc=1)
+- `PATCHED` — w1 + w2 without the write attempt (rc=0)
 - `MITIGATED-AT-EDGE` — 400/403/413/429 from WAF/CDN before PHP (rc=0)
 - `VULNERABLE (by version)` — no crash but X-Powered-By shows unpatched (rc=1)
 - `PATCHED (by version)` — X-Powered-By shows patched release (rc=0)
@@ -66,8 +67,18 @@ PHP prints THREE warnings in the response; the fix removes the third.
   retested at `/show_config_errors.php` which bypasses `display_errors=Off`
   (Assetnote technique)
 
-**Requires**: `display_errors=On` on the target for the behavioural verdict.
-If Off → INCONCLUSIVE (try phpMyAdmin path or local mode).
+**Requires**: error display enabled on the target for the behavioural verdict:
+- PHP ≥ 8.0: `display_errors=On` is enough.
+- PHP ≤ 7.4 / 5.6: these are RINIT-time warnings and reach the response
+  **only with `display_startup_errors=On`** (common on dev/staging and
+  misconfigured production). With it Off the response is byte-identical to
+  a benign request and no behavioural verdict is possible.
+- A valid `session.save_path` does NOT suppress w3 — the write is refused
+  because of the failed session state, not the path (verified on 8.1.34
+  with `save_path=/tmp`).
+
+If warnings are unavailable → INCONCLUSIVE (try phpMyAdmin path, version
+fallback, or local mode).
 
 ### Local mode (`--php-cgi` / `--php-cli`)
 
@@ -83,6 +94,45 @@ If Off → INCONCLUSIVE (try phpMyAdmin path or local mode).
 configuration. Gives a definitive answer about the binary.
 
 **Disadvantages**: needs local access to the PHP binary.
+
+### EOL branches (PHP 5.6 – 8.1): always vulnerable
+
+Official fixes exist only for supported branches (8.2.35 / 8.3.36 / 8.4.27 /
+8.5.12+). EOL branches will never receive an upstream fix, so for them the
+behavioural check confirms "the vulnerable behaviour is live", not
+"patched vs unpatched" — there is no patched EOL state to distinguish.
+Verified vulnerable by direct testing: 5.6.40, 7.0.33, 7.2.34, 7.3.33,
+7.4.33, 8.0.30, 8.1.34 (109619 local fires on all of them; the remote
+signature works with `display_startup_errors=On`).
+
+**Do not read silence on an EOL target as "clean".** If the behavioural
+probe is INCONCLUSIVE and `X-Powered-By` shows an EOL version, treat the
+target as vulnerable-by-version.
+
+### Why INCONCLUSIVE on hardened production is by design
+
+With `display_errors=Off` + `display_startup_errors=Off` (correctly
+configured production) the response carries **no** patch-correlated signal.
+We hunted for alternative remote oracles on live unpatched (8.1.34) vs
+patched (8.2.35) builds:
+
+- **Headers / status / body**: byte-identical across all probe variants
+  (illegal SID ± upload progress, with and without an app-level
+  `session_start()`). The fix changes only internal behaviour — nothing
+  leaks into the HTTP response.
+- **Session-cookie behaviour**: identical (Set-Cookie, Expires,
+  Cache-Control all match).
+- **Timing oracle (109618 mpheaders shape)**: exists but is weak.
+  A ~190k-header multipart form takes ~41 ms over baseline on unpatched
+  vs ~17 ms on patched locally (early parser bailout), with clean
+  separation — but the ~20–25 ms absolute delta drowns in WAN jitter,
+  requires per-target baselining (heavy form minus benign form, median of
+  N≥30), and is capped by the target's `post_max_size`. Experimental
+  statistical signal at best, not a single-request verdict.
+
+So on hardened production: warning-signature if errors are displayed →
+statistical timing (fragile) → version fallback → local decisive mode.
+An INCONCLUSIVE here is an honest answer, not a tool deficiency.
 
 ### Post-patch surface check (`--php-cli`)
 
