@@ -10,66 +10,116 @@ Updating is the only complete fix; these tools help you **verify** and **detect*
 
 ## Contents
 
-| File | What it is |
-|---|---|
-| `safechecks/cyberok_safecheck_cve_2026_109618.py` | Behavioural safe-check for CVE-2026-109618/109619. **Local mode** (`--php-cgi`): drives a throwaway php-cgi with official OOM shapes (bailout vs soft-OOM differential). **Remote mode** (`--url`): single non-destructive POST using the PortSwigger technique (invalid SID + upload_progress → three-warning response signature). Validated: 8.2.34 → AFFECTED, 8.2.35 → SAFE. |
-| `safechecks/cyberok_safecheck_cve_2026_109619.py` | Behavioural safe-check for CVE-2026-109619: poisoned session record + one multipart POST against a throwaway single-worker `php -S`; detects the pre-RINIT `unserialize_callback_func` invocation (the user-code gap the fix closes). Validated: 8.2.34 → VULNERABLE (rc 1), 8.2.35 → SAFE (rc 0). |
-| `safechecks/cyberok_safecheck_postpatch_surface.py` | **Post-patch surface check** (NOT a CVE test): verifies whether your PHP configuration remains exposed to the session-poisoning surface that SURVIVES the CVE fix. Tests: form-SID ingestion, progress-key persistence (cleanup=0/cleanup=1), handler mismatch. Validated: SURFACE EXPOSED on both 8.2.34 AND 8.2.35 (the form-SID path survives by design). Mitigation: `session.upload_progress.enabled = 0`. |
-| `suricata/cyberok_php_up_2026.rules` | 12 Suricata (Snort3-adaptable) signatures: chunked-multipart bypass, part-header amplification, deeply nested names, empty file controls, upload-progress poisoning (serialized payload / PHP tag in value and filename), PHPSESSID-as-form-field, handler-mismatch seed (`\|O:`), Set-Cookie leak oracle, giant filename, part flood. Validated on replayed real trigger traffic. |
-| `modsecurity/cyberok_php_up_2026.conf` | ModSecurity v2/v3 companion: the same surfaces on parsed variables (`ARGS`, `FILES_NAMES`, `ARGS_NAMES`) plus robust occurrence counting for the empty-filename flood (kept in the WAF layer — see notes). Desk-verified; burn in `DetectionOnly` before blocking. |
-| `LICENSE` | Copyright and usage notice (RU + EN). |
+| Component | Files | Description |
+|---|---|---|
+| **Safechecks** | 3 Python scripts | Behavioural vulnerability checks (local + remote + bulk scan). See [`safechecks/README.md`](safechecks/README.md) for full documentation. |
+| **Suricata** | 1 rules file (14 signatures) | HTTP request/response signatures for Snort/Suricata. Validated on real exploit traffic (mod_php + FPM). |
+| **ModSecurity** | 1 config file (18 rules) | WAF rules on parsed variables. Includes response-side behavioural detection and SAPI-specific crash-signal documentation. |
+| **Nuclei** | 1 template | Non-destructive behavioural detection with multi-path payloads. |
 
-## Usage
+## Quick start
+
+### Scan your infrastructure
 
 ```bash
-# Local, decisive (run on the origin host; touches only throwaway processes):
+# Single target:
+python3 safechecks/cyberok_safecheck_cve_2026_109618.py -u https://host/
+
+# Bulk scan (nuclei-style targets file + threads + JSON):
+python3 safechecks/cyberok_safecheck_cve_2026_109618.py -l targets.txt -t 20 -o results.json
+
+# Custom paths:
+python3 safechecks/cyberok_safecheck_cve_2026_109618.py -u https://host/ --path /index.php --path /api/status
+
+# CVE-2026-109619 — same interface:
+python3 safechecks/cyberok_safecheck_cve_2026_109619.py -u https://host/
+python3 safechecks/cyberok_safecheck_cve_2026_109619.py -l targets.txt -t 20 -o results.json
+```
+
+### Check a specific PHP binary (decisive)
+
+```bash
 python3 safechecks/cyberok_safecheck_cve_2026_109618.py --php-cgi /usr/bin/php-cgi
 python3 safechecks/cyberok_safecheck_cve_2026_109619.py --php-cli /usr/bin/php
-
-# Post-patch surface check (config exposure — works on all versions):
-python3 safechecks/cyberok_safecheck_postpatch_surface.py --php-cli /usr/bin/php
-
-# Remote surface mode (109618 safe-check only — reachability, not a version verdict):
-python3 safechecks/cyberok_safecheck_cve_2026_109618.py --url https://host/
-
-# Suricata: include the rules file, then check alerts:
-include: cyberok_php_up_2026.rules
-# offline replay of a capture:
-suricata -c suricata.yaml -S cyberok_php_up_2026.rules -k none -r capture.pcap -l out/
-
-# ModSecurity: include into your vhost/global config after SecRequestBodyAccess On
 ```
+
+### Check post-patch configuration exposure
+
+```bash
+python3 safechecks/cyberok_safecheck_postpatch_surface.py --php-cli /usr/bin/php
+```
+
+### Deploy detection rules
+
+```bash
+# Suricata:
+include: suricata/cyberok_php_up_2026.rules
+# offline replay:
+suricata -c suricata.yaml -S suricata/cyberok_php_up_2026.rules -k none -r capture.pcap -l out/
+
+# ModSecurity:
+Include modsecurity/cyberok_php_up_2026.conf
+
+# Nuclei:
+nuclei -t nuclei/cyberok_php2shell_detect.yaml -u https://target/
+```
+
+## Detection coverage
+
+### Suricata signatures (14)
+
+| SID | Detection | Vector |
+|---|---|---|
+| 6101 | Chunked multipart POST | 109618-A (post_max_size bypass) |
+| 6102 | Part-header amplification (100+) | 109618-B |
+| 6103 | Generic header-run amplification | 109618-B (variant) |
+| 6104 | Deeply nested input names (40+) | 109618 aux |
+| 6105 | Empty-filename file control | 109618-C |
+| 6106 | Serialized payload in UPLOAD_PROGRESS | 109619 (poisoning) |
+| 6107 | Payload in multipart filename | 109619 (carrier) |
+| 6108 | PHPSESSID as form field | 109619 (sid injection) |
+| 6109 | Part flood (>500 parts) | Heap grooming |
+| 6110 | Handler-mismatch seed (pipe+serialized) | 109619 (handler mismatch) |
+| 6111 | Set-Cookie PHPSESSID leak oracle | 109618 (response-side) |
+| 6112 | Giant multipart filename (>4000 chars) | 109618 arm |
+| 6113 | UPLOAD_PROGRESS field present (anomaly) | Generic |
+| 6114 | Invalid PHPSESSID cookie (charset) | Generic |
+
+### ModSecurity rules (18)
+
+Request-side (phase 1–2): matching Suricata coverage on parsed variables +
+robust occurrence counting. Response-side (phase 3): behavioural detection
+via three-warning signature. Includes SAPI-specific crash-signal taxonomy
+(mod_php vs FPM) and rejected-statuses troubleshooting guide.
 
 ## Detection notes
 
-- **Deployment variables**: adjust `$HTTP_PORTS` / `HOME_NET`; offline analysis of
-  loopback captures needs `-k none` (checksum offload).
-- **Counting caveat (Suricata)**: occurrence counting (`{N,}`) over variable-gap
-  multipart units is unreliable under Suricata's PCRE2 + inspect windows — the
-  Suricata set uses the high-specificity *unit signature* for the empty-file
-  flood; robust `{50,}` counting lives in the ModSecurity companion.
-- **Post-patch relevance**: rules for `PHP_SESSION_UPLOAD_PROGRESS` poisoning and
-  `PHPSESSID`-as-form-field remain useful **on patched versions**: the form-SID
-  ingestion path survives the 8.2.35 fix (with `session.upload_progress.cleanup=0`
-  the progress data still lands in the attacker-chosen session file), so these
-  stay enabled as poisoning-enabler signals. Session-id traversal via this path
-  is closed by the `[A-Za-z0-9,-]` charset validator on both versions.
+- **Suricata counting caveat**: occurrence counting (`{N,}`) over variable-gap
+  multipart units is unreliable under PCRE2 + inspect windows — the Suricata
+  set uses unit signatures; robust counting lives in ModSecurity.
+- **Post-patch relevance**: rules for `PHP_SESSION_UPLOAD_PROGRESS` poisoning
+  and `PHPSESSID`-as-form-field remain useful on patched versions (the
+  form-SID ingestion path survives the 8.2.35 fix with `cleanup=0`).
 - **Safe-checks are behavioural, not version checks**: they conclude from the
-  signal itself (startup-phase bailout / pre-RINIT callback invocation); `php -v`
-  on the origin remains the authoritative version answer.
+  signal itself; `php -v` remains the authoritative version answer.
 
-## Validation summary (2026-10-21)
+## Validation summary
 
-- Safe-checks: A/B-validated on ASan debug builds of PHP 8.2.34 (vulnerable) and
-  8.2.35 (patched) plus a stock `php:8.2.34-apache` mod_php stand; differentials
-  confirmed on 5/5 repeated runs (109618) and deterministic single-run (109619).
-- Suricata: real trigger shapes captured on a live stand, replayed through the
-  rules — 7/7 trigger signatures fired, the clean upload control raised nothing.
+| Test | Result |
+|---|---|
+| Safechecks local (8.2.34 vs 8.2.35 ASan) | Both decisive (A/B) |
+| Safechecks remote (php:8.2.34-apache vs php:8.2.35-fpm) | Both decisive |
+| Bulk scan (2 targets, JSON) | Correct: 1 vulnerable + 1 patched |
+| Suricata vs mod_php traffic | 9/10 request signatures fired, control silent |
+| Suricata vs FPM traffic | 9/10 fired, control silent |
+| ModSecurity patterns | Desk-verified against exact trigger bytes |
+| phpMyAdmin retest | Technique validated (Assetnote) |
 
 ## References
 
-- GHSA-w8hw-w9fx-j79w / CVE-2026-109618 — https://github.com/php/php-src/security/advisories/GHSA-w8hw-w9fx-j79w
-- GHSA-6wmf-4rv5-p3rp / CVE-2026-109619 — https://github.com/php/php-src/security/advisories/GHSA-6wmf-4rv5-p3rp
+- [GHSA-w8hw-w9fx-j79w / CVE-2026-109618](https://github.com/php/php-src/security/advisories/GHSA-w8hw-w9fx-j79w)
+- [GHSA-6wmf-4rv5-p3rp / CVE-2026-109619](https://github.com/php/php-src/security/advisories/GHSA-6wmf-4rv5-p3rp)
+- [PHP Security Release](https://www.php.net/archive/2026.php#2026-10-21-5)
 
 ---
 
