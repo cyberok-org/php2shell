@@ -72,6 +72,48 @@ def free_port():
     return p
 
 
+def read_production_config(php_cli):
+    """Read the effective production php.ini values (not -n overrides)."""
+    directives = [
+        "session.upload_progress.enabled",
+        "session.upload_progress.cleanup",
+        "session.serialize_handler",
+        "session.use_strict_mode",
+        "session.save_path",
+    ]
+    config = {}
+    for d in directives:
+        try:
+            r = subprocess.run(
+                [php_cli, "-r", f"echo ini_get('{d}');"],
+                capture_output=True, text=True, timeout=10)
+            config[d] = r.stdout.strip()
+        except Exception:
+            config[d] = "ERROR"
+    return config
+
+
+def check_production_config(config):
+    """Check if the PRODUCTION config has the post-patch surface exposed."""
+    print("--- PRODUCTION CONFIG (effective php.ini, not -n overrides) ---")
+    for k, v in config.items():
+        print(f"  {k} = {v!r}")
+
+    upload_enabled = config.get("session.upload_progress.enabled", "") in ("1", "On", "on", "")
+    handler = config.get("session.serialize_handler", "")
+
+    exposed = []
+    if upload_enabled:
+        exposed.append("upload_progress.enabled=1 (surface reachable)")
+        cleanup = config.get("session.upload_progress.cleanup", "")
+        if cleanup in ("0", "Off", "off", ""):
+            exposed.append("upload_progress.cleanup=0 (poisoning persists)")
+    if handler in ("php_binary", "php_serialize", ""):
+        exposed.append(f"serialize_handler={handler!r} (CVE-2026-115560 precondition)")
+
+    return exposed
+
+
 def check_form_sid(php_cli, docroot, sessdir, cleanup):
     """Test 1+2: can a multipart field set the session id and persist content?"""
     port = free_port()
@@ -200,6 +242,8 @@ echo "SID=" . session_id() . "\\n";
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--php-cli", required=True, help="path to php CLI binary")
+    ap.add_argument("--check-config", action="store_true",
+                    help="check production php.ini only (no dynamic test)")
     a = ap.parse_args()
 
     td = tempfile.mkdtemp(prefix="postpatch-")
@@ -208,6 +252,24 @@ def main():
     os.makedirs(sess)
     with open(os.path.join(www, "index.php"), "w") as f:
         f.write("<?php echo 'ok';\n")
+
+    if a.check_config:
+        print("=== PRODUCTION CONFIG CHECK (CVE-2026-115560 + post-patch surface) ===")
+        print(f"PHP binary: {a.php_cli}")
+        ver = subprocess.run([a.php_cli, "-v"], capture_output=True, text=True)
+        print(f"Version:    {(ver.stdout or '?').splitlines()[0]}")
+        print()
+        config = read_production_config(a.php_cli)
+        exposed = check_production_config(config)
+        print()
+        if exposed:
+            print("VERDICT: PRODUCTION SURFACE EXPOSED:")
+            for e in exposed:
+                print(f"  • {e}")
+            print("\nMITIGATION: session.upload_progress.enabled = 0")
+            return 1
+        print("VERDICT: PRODUCTION SURFACE CLOSED (upload_progress disabled or handler safe)")
+        return 0
 
     print("=== POST-PATCH SURFACE CHECK (not a CVE test) ===")
     print(f"PHP binary: {a.php_cli}")

@@ -125,3 +125,10 @@ alert http $HOME_NET $HTTP_PORTS -> $EXTERNAL_NET any (msg:"PHP-UP-2026 CVE-2026
 # Default webshell names and response markers from the 8512 chain
 alert http $EXTERNAL_NET any -> $HOME_NET $HTTP_PORTS (msg:"PHP-UP-2026 post-exploit IoC: php2shell webshell access"; flow:established,to_server; http.uri; content:"p2s_8512_shell.php"; classtype:successful-admin; sid:1000006119; rev:1; metadata:created_at 2026_10_22;)
 alert http $HOME_NET $HTTP_PORTS -> $EXTERNAL_NET any (msg:"PHP-UP-2026 post-exploit IoC: SHELL_ALIVE marker in response"; flow:established,to_client; http.response_body; content:"SHELL_ALIVE"; classtype:successful-admin; sid:1000006120; rev:1; metadata:created_at 2026_10_22;)
+
+# --- Corelight-derived: serialized integer-key collision pattern ------------
+# Detects the 2^32-step integer sequence (4294967296, 8589934592, 12884901888)
+# used by the ASLR-bypass heap spray. Structural signature that doesn't depend
+# on PHP_SESSION_UPLOAD_PROGRESS presence or specific class names.
+# Credit: Corelight SID 3000653 (adapted to our SID space)
+alert http $EXTERNAL_NET any -> $HOME_NET $HTTP_PORTS (msg:"PHP-UP-2026 serialized integer-key collision pattern (heap spray, ASLR bypass)"; flow:established,to_server; http.method; content:"POST"; http.request_body; content:"i:4294967296|3b|"; fast_pattern; content:"i:8589934592|3b|"; distance:0; within:48; content:"i:12884901888|3b|"; distance:0; within:48; classtype:attempted-admin; sid:1000006121; rev:1; metadata:created_at 2026_10_28, cve CVE-2026-109618, cve CVE-2026-109619;)

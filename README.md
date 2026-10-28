@@ -8,14 +8,21 @@ Defense tooling for the PHP "php2shell" security release of 2026-10-21:
 Affected: PHP 8.2 < 8.2.35 · 8.3 < 8.3.36 · 8.4 < 8.4.27 · 8.5 < 8.5.12.
 Updating is the only complete fix; these tools help you **verify** and **detect**.
 
+**EOL branches (7.4, 8.0, 8.1)**: the PHP security team published source
+backports — these branches are not automatically "always vulnerable".
+Verify your distribution's backport status; `memory_hard_limit_percent`
+absence does NOT prove vulnerability (the 8.1 backport fixes both CVEs
+without adding that directive).
+
 ## Contents
 
 | Component | Files | Description |
 |---|---|---|
 | **Safechecks** | 3 Python scripts | Behavioural vulnerability checks (local + remote + bulk scan). See [`safechecks/README.md`](safechecks/README.md) for full documentation. |
-| **Suricata** | 1 rules file (20 signatures) | HTTP request/response signatures for Snort/Suricata. Validated on real exploit traffic (mod_php + FPM). |
+| **Suricata** | 1 rules file (21 signatures) | HTTP request/response signatures for Snort/Suricata. Validated on real exploit traffic (mod_php + FPM). |
 | **ModSecurity** | 1 config file (23 rules) | WAF rules on parsed variables. Includes response-side behavioural detection and SAPI-specific crash-signal documentation. |
-| **Nuclei** | 1 template | Non-destructive behavioural detection with multi-path payloads. |
+| **Nuclei** | 4 templates (behavioural + surface + EOL + startup-surface) |
+| **Sigma** | 4 SIEM rules (HTTP exploit, PHP OOM, session decode, process creation) | Non-destructive behavioural detection with multi-path payloads. |
 
 ## Quick start
 
