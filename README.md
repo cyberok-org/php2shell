@@ -116,7 +116,7 @@ post-exploit markers. Includes SAPI-specific crash-signal taxonomy
   form-SID ingestion path survives the 8.2.35 fix with `cleanup=0`).
 - **Safe-checks are behavioural, not version checks**: they conclude from the
   signal itself; `php -v` remains the authoritative version answer.
-- **EOL branches (5.6–8.1)**: no upstream fix exists — the safechecks verify
+- **EOL branches (5.6–8.1)**: source backports exist (php.net) — verify your distro
   the vulnerable *behaviour* on them (all confirmed vulnerable by direct
   testing). Remote detection on ≤7.4 requires `display_startup_errors=On`
   on the target; on hardened production (both display flags Off) no

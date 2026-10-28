@@ -102,6 +102,21 @@ def _probe_url(url, timeout=20):
         return None, str(e).encode(), ""
 
 
+def _simple_get(url, timeout=10):
+    """Send a minimal GET to check if the path itself is blocked."""
+    import urllib.request
+    import urllib.error
+    req = urllib.request.Request(url, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout,
+                                    context=ssl.create_default_context()) as r:
+            return r.status
+    except urllib.error.HTTPError as e:
+        return e.code
+    except Exception:
+        return None
+
+
 def remote_check(url, verbose=True):
     """Full remote check for a single URL. Returns dict with verdict."""
     result = {"url": url, "verdict": "INCONCLUSIVE", "exit_code": 2, "reason": ""}
@@ -148,9 +163,31 @@ def remote_check(url, verbose=True):
         result["reason"] = ("two warnings (illegal SID + failed read) without "
                            "the write attempt — fix present")
     elif status in REJECTED_STATUSES:
-        result["verdict"] = "MITIGATED-AT-EDGE"
-        result["exit_code"] = 0
-        result["reason"] = f"HTTP {status} = rejected before PHP parsed (WAF/CDN)"
+        # A 4xx status alone does NOT prove edge rejection — the PHP
+        # application itself can return 403 after parsing the body.
+        # Only claim edge rejection if the SAME path also rejects GET
+        # (i.e., the path itself is blocked, not just our POST).
+        get_status = _simple_get(url, timeout=10)
+        if get_status in REJECTED_STATUSES:
+            result["verdict"] = "MITIGATED-AT-EDGE"
+            result["exit_code"] = 0
+            result["reason"] = (f"POST→{status} AND GET→{get_status}: path "
+                               f"blocked at edge (WAF/CDN)")
+        else:
+            result["verdict"] = "PROBE-REJECTED"
+            result["exit_code"] = 2
+            result["reason"] = (f"POST→{status} but GET→{get_status}: application "
+                               f"may have parsed the body; patch status unknown")
+            if powered_by:
+                ver = _version_verdict(powered_by)
+                if ver == "FIXED":
+                    result["verdict"] = "PATCHED (by version)"
+                    result["exit_code"] = 0
+                    result["reason"] += f"; X-Powered-By reports patched: {powered_by}"
+                elif ver == "VULNERABLE":
+                    result["verdict"] = "VULNERABLE (by version)"
+                    result["exit_code"] = 1
+                    result["reason"] += f"; X-Powered-By reports unpatched: {powered_by}"
     else:
         ver = _version_verdict(powered_by)
         if ver == "VULNERABLE":
@@ -185,15 +222,16 @@ def bulk_scan(urls, threads=10, output=None):
     url_order = {u: i for i, u in enumerate(urls)}
     results.sort(key=lambda r: url_order.get(r["url"], 999))
 
-    # summary — four distinct outcomes (NOT conflating inconclusive with safe)
+    # summary — categories must sum to total (no orphans)
     vulnerable  = [r for r in results if r["verdict"].startswith("VULNERABLE")]
-    confirmed_patched = [r for r in results if r["verdict"] == "PATCHED"]
+    confirmed_patched = [r for r in results if r["verdict"] in ("PATCHED", "PATCHED (by version)")]
     edge_rejected = [r for r in results if "MITIGATED" in r["verdict"]]
-    inconclusive = [r for r in results if r["exit_code"] == 2]
+    inconclusive = [r for r in results if r["exit_code"] == 2 and r not in vulnerable + confirmed_patched + edge_rejected]
     print(f"\n[*] RESULTS: {len(vulnerable)} vulnerable | "
-          f"{len(confirmed_patched)} confirmed_patched | "
+          f"{len(confirmed_patched)} patched | "
           f"{len(edge_rejected)} edge_rejected | "
-          f"{len(inconclusive)} inconclusive")
+          f"{len(inconclusive)} inconclusive | "
+          f"total={len(results)}")
 
     if output:
         import datetime as _dt
@@ -201,9 +239,10 @@ def bulk_scan(urls, threads=10, output=None):
             json.dump({"scanned_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
                        "total": len(results),
                        "vulnerable": len(vulnerable),
-                       "confirmed_patched": len(confirmed_patched),
+                       "patched": len(confirmed_patched),
                        "edge_rejected": len(edge_rejected),
                        "inconclusive": len(inconclusive),
+                       "categories_sum_check": len(vulnerable) + len(confirmed_patched) + len(edge_rejected) + len(inconclusive),
                        "results": results}, f, indent=2)
         print(f"[*] results saved to {output}")
 

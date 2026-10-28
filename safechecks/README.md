@@ -95,7 +95,13 @@ configuration. Gives a definitive answer about the binary.
 
 **Disadvantages**: needs local access to the PHP binary.
 
-### EOL branches (PHP 5.6 – 8.1): always vulnerable
+### EOL branches (PHP 5.6 – 8.1): source backports available
+
+The PHP security team published source backport patches for 7.4, 8.0, 8.1.
+These branches are NOT automatically "always vulnerable" — verify your
+distribution's backport status. Note: the 8.1 backport fixes both CVEs
+without adding `memory_hard_limit_percent`, so absence of that directive
+does NOT prove vulnerability.
 
 Official fixes exist only for supported branches (8.2.35 / 8.3.36 / 8.4.27 /
 8.5.12+). EOL branches will never receive an upstream fix, so for them the
