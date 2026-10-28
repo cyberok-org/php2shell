@@ -73,7 +73,7 @@ def free_port():
 
 
 def read_production_config(php_cli):
-    """Read the effective production php.ini values (not -n overrides)."""
+    """Read the effective php.ini values. Returns (config, all_ok)."""
     directives = [
         "session.upload_progress.enabled",
         "session.upload_progress.cleanup",
@@ -82,36 +82,55 @@ def read_production_config(php_cli):
         "session.save_path",
     ]
     config = {}
+    errors = []
     for d in directives:
         try:
             r = subprocess.run(
                 [php_cli, "-r", f"echo ini_get('{d}');"],
                 capture_output=True, text=True, timeout=10)
-            config[d] = r.stdout.strip()
-        except Exception:
-            config[d] = "ERROR"
-    return config
+            if r.returncode != 0:
+                errors.append(d)
+                config[d] = "READ_ERROR"
+            else:
+                config[d] = r.stdout.strip()
+        except Exception as e:
+            errors.append(d)
+            config[d] = f"READ_ERROR({type(e).__name__})"
+    return config, errors
 
 
 def check_production_config(config):
-    """Check if the PRODUCTION config has the post-patch surface exposed."""
-    print("--- PRODUCTION CONFIG (effective php.ini, not -n overrides) ---")
+    """Check if the PRODUCTION config has the post-patch surface exposed.
+    Returns (exposed_list, has_errors)."""
+    print("--- PRODUCTION CONFIG (CLI SAPI — web SAPI may differ) ---")
     for k, v in config.items():
         print(f"  {k} = {v!r}")
 
-    upload_enabled = config.get("session.upload_progress.enabled", "") in ("1", "On", "on", "")
+    has_errors = any(v.startswith("READ_ERROR") for v in config.values())
+    if has_errors:
+        return [], True
+
+    # ini_get returns "" for Off boolean directives (PHP manual)
+    # So "" for upload_progress.enabled means DISABLED, not enabled
+    enabled_raw = config.get("session.upload_progress.enabled", "")
+    upload_enabled = enabled_raw in ("1", "On", "on", "true", "True")
+
     handler = config.get("session.serialize_handler", "")
+    # PHP default serialize_handler is 'php', NOT php_serialize
+    if handler == "":
+        handler = "php"  # documented default
 
     exposed = []
     if upload_enabled:
         exposed.append("upload_progress.enabled=1 (surface reachable)")
         cleanup = config.get("session.upload_progress.cleanup", "")
-        if cleanup in ("0", "Off", "off", ""):
+        # "" means On (default), "0" means Off
+        if cleanup == "0":
             exposed.append("upload_progress.cleanup=0 (poisoning persists)")
-    if handler in ("php_binary", "php_serialize", ""):
+    if handler in ("php_binary", "php_serialize"):
         exposed.append(f"serialize_handler={handler!r} (CVE-2026-115560 precondition)")
 
-    return exposed
+    return exposed, False
 
 
 def check_form_sid(php_cli, docroot, sessdir, cleanup):
@@ -259,16 +278,20 @@ def main():
         ver = subprocess.run([a.php_cli, "-v"], capture_output=True, text=True)
         print(f"Version:    {(ver.stdout or '?').splitlines()[0]}")
         print()
-        config = read_production_config(a.php_cli)
-        exposed = check_production_config(config)
+        config, errors = read_production_config(a.php_cli)
+        exposed, has_errors = check_production_config(config)
         print()
+        if has_errors:
+            print("VERDICT: INCONCLUSIVE — could not read PHP configuration.")
+            print("  Errors in:", ", ".join(errors) if errors else "unknown")
+            return 2
         if exposed:
-            print("VERDICT: PRODUCTION SURFACE EXPOSED:")
+            print("VERDICT: CLI CONFIG EXPOSED (web SAPI may differ):")
             for e in exposed:
                 print(f"  • {e}")
             print("\nMITIGATION: session.upload_progress.enabled = 0")
             return 1
-        print("VERDICT: PRODUCTION SURFACE CLOSED (upload_progress disabled or handler safe)")
+        print("VERDICT: CLI CONFIG CLOSED (web SAPI may differ — verify FPM/Apache pool)")
         return 0
 
     print("=== POST-PATCH SURFACE CHECK (not a CVE test) ===")

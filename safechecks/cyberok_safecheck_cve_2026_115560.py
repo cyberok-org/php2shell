@@ -48,67 +48,60 @@ import sys
 
 
 def get_ini_value(php_cli, directive, php_ini=None):
-    """Read the effective ini value for a directive."""
+    """Read the effective ini value. Returns string, or '_ERROR_' on failure."""
     cmd = [php_cli, "-r", f"echo ini_get('{directive}');"]
     if php_ini:
         cmd = [php_cli, "-c", php_ini, "-r", f"echo ini_get('{directive}');"]
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        if result.returncode != 0:
+            return "_ERROR_"
         return result.stdout.strip()
     except Exception:
-        return None
+        return "_ERROR_"
 
 
 def check_config(php_cli, php_ini=None):
     """Check the two server-side preconditions for CVE-2026-115560."""
-    print("=== CVE-2026-115560: Serializer Mismatch Preconditions ===\n")
+    print("=== CVE-2026-115560: Serializer Mismatch Preconditions (CLI SAPI) ===\n")
 
-    results = {}
-
-    # Condition 1: serialize_handler is php_binary or php_serialize
+    # Check for read errors first
     handler = get_ini_value(php_cli, "session.serialize_handler", php_ini)
-    results["serialize_handler"] = handler
-    print(f"  session.serialize_handler = {handler!r}")
-    handler_vulnerable = handler in ("php_binary", "php_serialize", "")
-    if handler == "":
-        print("    → EMPTY (will use php_serialize default in PHP 7.0+)")
-        handler_vulnerable = True
-    elif handler == "php":
-        print("    → 'php' (default): NOT vulnerable to this specific mismatch")
-        handler_vulnerable = False
-    elif handler_vulnerable:
-        print(f"    → '{handler}': VULNERABLE precondition met")
-    else:
-        print(f"    → '{handler}': unknown handler")
-
-    # Condition 3: upload_progress.enabled
     progress = get_ini_value(php_cli, "session.upload_progress.enabled", php_ini)
-    results["upload_progress_enabled"] = progress
-    print(f"  session.upload_progress.enabled = {progress!r}")
-    progress_enabled = progress in ("1", "On", "on", "true", "")
-    if progress_enabled:
-        print("    → ENABLED: VULNERABLE precondition met")
-    else:
-        print("    → DISABLED: surface closed")
 
-    # Additional context
+    if "_ERROR_" in (handler, progress):
+        print("VERDICT: INCONCLUSIVE — could not read PHP configuration.")
+        print("  Run manually to debug:")
+        print("  php -r 'var_dump(ini_get(\"session.serialize_handler\"));'")
+        return 2
+
+    print(f"  session.serialize_handler = {handler!r}")
+    print(f"  session.upload_progress.enabled = {progress!r}")
+
+    # PHP default serialize_handler is 'php' (not php_serialize)
+    if handler == "":
+        handler = "php"
+        print(f"  (empty → using documented default: 'php')")
+
+    # ini_get returns "" for Off boolean directives (PHP manual)
+    # So "" for enabled means DISABLED
+    progress_enabled = progress in ("1", "On", "on", "true", "True")
+    handler_vulnerable = handler in ("php_binary", "php_serialize")
+
     cleanup = get_ini_value(php_cli, "session.upload_progress.cleanup", php_ini)
-    results["cleanup"] = cleanup
     print(f"  session.upload_progress.cleanup = {cleanup!r}")
     use_strict = get_ini_value(php_cli, "session.use_strict_mode", php_ini)
-    results["use_strict_mode"] = use_strict
     print(f"  session.use_strict_mode = {use_strict!r}")
 
-    # Verdict
     print("\n" + "=" * 50)
-    if progress == "0" or progress == "Off" or progress == "off":
-        print("VERDICT: SURFACE CLOSED — session.upload_progress.enabled=0")
-        print("  The upload-progress mechanism is disabled; the poisoning")
-        print("  path for CVE-2026-115560 cannot be reached.")
+    if not progress_enabled:
+        print("VERDICT: SURFACE CLOSED — session.upload_progress disabled")
+        print("  Note: this is the CLI SAPI config; web SAPI (FPM/Apache) may differ.")
         return 0
     elif handler_vulnerable and progress_enabled:
         print("VERDICT: PRECONDITIONS MET — server-side surface is exposed.")
         print(f"  serialize_handler={handler!r} + upload_progress=enabled.")
+        print("  Note: this is the CLI SAPI config; web SAPI may differ.")
         print("  The REMAINING condition is APPLICATION-side:")
         print("  the app must call ini_set('session.serialize_handler', 'php')")
         print("  before session_start(). Audit application code for this pattern.")
@@ -118,9 +111,10 @@ def check_config(php_cli, php_ini=None):
         print(f"VERDICT: PARTIALLY EXPOSED — upload_progress enabled but")
         print(f"  serialize_handler={handler!r} is not php_binary/php_serialize.")
         print("  Vulnerable only if the app switches handler at runtime.")
+        print("  Note: this is the CLI SAPI config; web SAPI may differ.")
         return 0
     else:
-        print("VERDICT: INCONCLUSIVE — could not read configuration.")
+        print("VERDICT: INCONCLUSIVE — unexpected configuration state.")
         return 2
 
 
