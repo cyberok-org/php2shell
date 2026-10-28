@@ -185,24 +185,35 @@ def bulk_scan(urls, threads=10, output=None):
     url_order = {u: i for i, u in enumerate(urls)}
     results.sort(key=lambda r: url_order.get(r["url"], 999))
 
-    # summary
-    vulnerable = [r for r in results if r["exit_code"] == 1]
-    patched = [r for r in results if r["exit_code"] == 0]
+    # summary — four distinct outcomes (NOT conflating inconclusive with safe)
+    vulnerable  = [r for r in results if r["verdict"].startswith("VULNERABLE")]
+    confirmed_patched = [r for r in results if r["verdict"] == "PATCHED"]
+    edge_rejected = [r for r in results if "MITIGATED" in r["verdict"]]
     inconclusive = [r for r in results if r["exit_code"] == 2]
     print(f"\n[*] RESULTS: {len(vulnerable)} vulnerable | "
-          f"{len(patched)} patched | {len(inconclusive)} inconclusive")
+          f"{len(confirmed_patched)} confirmed_patched | "
+          f"{len(edge_rejected)} edge_rejected | "
+          f"{len(inconclusive)} inconclusive")
 
     if output:
+        import datetime as _dt
         with open(output, "w") as f:
-            json.dump({"scanned_at": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
+            json.dump({"scanned_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
                        "total": len(results),
                        "vulnerable": len(vulnerable),
-                       "patched": len(patched),
+                       "confirmed_patched": len(confirmed_patched),
+                       "edge_rejected": len(edge_rejected),
                        "inconclusive": len(inconclusive),
                        "results": results}, f, indent=2)
         print(f"[*] results saved to {output}")
 
-    return 1 if vulnerable else 0
+    # exit 1 only when at least one is VULNERABLE; exit 0 only when ALL are
+    # confirmed_patched or edge_rejected (no inconclusive); else exit 2
+    if vulnerable:
+        return 1
+    if inconclusive:
+        return 2
+    return 0
 
 
 # ------------------------------------------------------------------ local mode

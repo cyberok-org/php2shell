@@ -246,14 +246,23 @@ def main():
             results.append(r)
             print(f"  {r['url']}  {r['verdict']}")
 
+    # four distinct outcomes (NOT conflating inconclusive with not-vulnerable)
     vuln = [r for r in results if r["exit_code"] == 1]
+    patched = [r for r in results if r["exit_code"] == 0]
+    inconclusive = [r for r in results if r["exit_code"] == 2]
     print(f"\n[*] RESULTS: {len(vuln)} vulnerable | "
-          f"{len(results) - len(vuln)} not vulnerable")
+          f"{len(patched)} patched | {len(inconclusive)} inconclusive")
     if a.output:
         with open(a.output, "w") as f:
             json.dump({"total": len(results), "vulnerable": len(vuln),
+                       "patched": len(patched),
+                       "inconclusive": len(inconclusive),
                        "results": results}, f, indent=2)
-    return 1 if vuln else 0
+    if vuln:
+        return 1
+    if inconclusive:
+        return 2
+    return 0
 
 
 if __name__ == "__main__":

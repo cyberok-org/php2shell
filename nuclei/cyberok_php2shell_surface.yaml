@@ -5,17 +5,18 @@ info:
   author: CyberOK
   severity: high
   description: |
-    Multi-check template covering the php2shell attack surface beyond the
-    behavioural detection (see cyberok_php2shell_detect.yaml):
+    Multi-check template covering the php2shell attack surface:
 
-    1. Version-based: reads X-Powered-By for PHP version, checks against
-       patched releases (8.2.35/8.3.36/8.4.27/8.5.12).
-    2. LFI trigger: checks if the target exposes a parameter that accepts
-       a session-file path (tpl/template/view/page/file → /tmp/sess_*).
-    3. Post-exploit IoCs: webshell access (p2s_8512_shell.php) and
-       response markers (SHELL_ALIVE, PAYLOAD_PERSISTED).
+    1. Version-based: reads X-Powered-By for PHP version and matches
+       against UNPATCHED versions using regex with numeric word-boundaries
+       (not substring — PHP/8.2.3 must NOT match PHP/8.2.35).
+    2. LFI trigger: checks if a parameter reflects session-file content.
+    3. Post-exploit IoCs: webshell access and response markers.
+    4. Response-side session decode failure.
 
-    Combine with cyberok_php2shell_detect.yaml for full coverage.
+    Note: version-based check has known limitations — distro backports
+    (Debian/Ubuntu/RHEL) may patch without changing the version string.
+    A "vulnerable version" result should be verified behaviourally.
   reference:
     - https://github.com/php/php-src/security/advisories/GHSA-w8hw-w9fx-j79w
     - https://github.com/php/php-src/security/advisories/GHSA-6wmf-4rv5-p3rp
@@ -23,7 +24,7 @@ info:
   tags: php,rce,cve-2026,cyberok,surface,lfi
 
 http:
-  # --- Check 1: version-based from response headers ---
+  # --- Check 1: unpatched version via regex (word-boundary, not substring) ---
   - raw:
       - |
         GET / HTTP/1.1
@@ -31,77 +32,41 @@ http:
 
     matchers-condition: or
     matchers:
-      - type: word
+      # PHP 8.2: 8.2.0–8.2.34 are unpatched (fixed in 8.2.35)
+      # Pattern: PHP/8.2.<0-29> NOT followed by another digit
+      #          PHP/8.2.3[0-4] NOT followed by another digit
+      - type: regex
         part: header
-        words:
-          - "PHP/8.2.0"
-          - "PHP/8.2.1"
-          - "PHP/8.2.2"
-          - "PHP/8.2.3"
-          - "PHP/8.2.4"
-          - "PHP/8.2.5"
-          - "PHP/8.2.6"
-          - "PHP/8.2.7"
-          - "PHP/8.2.8"
-          - "PHP/8.2.9"
-          - "PHP/8.2.10"
-          - "PHP/8.2.11"
-          - "PHP/8.2.12"
-          - "PHP/8.2.13"
-          - "PHP/8.2.14"
-          - "PHP/8.2.15"
-          - "PHP/8.2.16"
-          - "PHP/8.2.17"
-          - "PHP/8.2.18"
-          - "PHP/8.2.19"
-          - "PHP/8.2.20"
-          - "PHP/8.2.21"
-          - "PHP/8.2.22"
-          - "PHP/8.2.23"
-          - "PHP/8.2.24"
-          - "PHP/8.2.25"
-          - "PHP/8.2.26"
-          - "PHP/8.2.27"
-          - "PHP/8.2.28"
-          - "PHP/8.2.29"
-          - "PHP/8.2.30"
-          - "PHP/8.2.31"
-          - "PHP/8.2.32"
-          - "PHP/8.2.33"
-          - "PHP/8.2.34"
-        condition: or
+        regex:
+          - 'PHP/8\.2\.(?:[0-9]|[12][0-9]|3[0-4])(?![0-9])'
+          - 'PHP/8\.3\.(?:[0-9]|[12][0-9]|3[0-5])(?![0-9])'
+          - 'PHP/8\.4\.(?:[0-9]|1[0-9]|2[0-6])(?![0-9])'
+          - 'PHP/8\.5\.(?:[0-9]|1[01])(?![0-9])'
+          - 'PHP/[5-7]\.'
 
-  # --- Check 2: LFI trigger (session-file path in common params) ---
+  # --- Check 2: LFI trigger (session-file path reflected) ---
   - raw:
       - |
-        GET /?tpl=/tmp/sess_test HTTP/1.1
+        GET /?tpl=/tmp/sess_cyberok_test HTTP/1.1
         Host: {{Hostname}}
 
       - |
-        GET /?template=/tmp/sess_test HTTP/1.1
+        GET /?template=/tmp/sess_cyberok_test HTTP/1.1
         Host: {{Hostname}}
 
       - |
-        GET /?view=/tmp/sess_test HTTP/1.1
-        Host: {{Hostname}}
-
-      - |
-        GET /?page=/tmp/sess_test HTTP/1.1
-        Host: {{Hostname}}
-
-      - |
-        GET /?file=/tmp/sess_test HTTP/1.1
+        GET /?view=/tmp/sess_cyberok_test HTTP/1.1
         Host: {{Hostname}}
 
     stop-at-first-match: false
 
     matchers:
+      # Match the SPECIFIC content we injected (not generic "sess_")
       - type: word
         part: body
         words:
-          - "upload_progress_"
-          - "sess_"
-          - "start_time"
+          - "upload_progress_cyberok_test"
+          - "sess_cyberok_test"
         condition: or
 
   # --- Check 3: post-exploit webshell IoC ---
@@ -124,23 +89,22 @@ http:
         POST / HTTP/1.1
         Host: {{Hostname}}
         Cookie: PHPSESSID=_
-        Content-Type: multipart/form-data; boundary=----x
+        Content-Type: multipart/form-data; boundary=----cyberok
 
-        ----x
+        ----cyberok
         Content-Disposition: form-data; name="PHP_SESSION_UPLOAD_PROGRESS"
 
-        test
-        ----x
+        cyberok_test
+        ----cyberok
         Content-Disposition: form-data; name="f"; filename="a.txt"
         Content-Type: text/plain
 
         1
-        ----x--
+        ----cyberok--
 
     matchers:
       - type: word
         part: body
         words:
-          - "Session object destruction failed"
-          - "Failed to decode session object"
-        condition: or
+          - "Failed to write session data"
+        condition: and
