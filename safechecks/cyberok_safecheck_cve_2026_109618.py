@@ -163,31 +163,27 @@ def remote_check(url, verbose=True):
         result["reason"] = ("two warnings (illegal SID + failed read) without "
                            "the write attempt — fix present")
     elif status in REJECTED_STATUSES:
-        # A 4xx status alone does NOT prove edge rejection — the PHP
-        # application itself can return 403 after parsing the body.
-        # Only claim edge rejection if the SAME path also rejects GET
-        # (i.e., the path itself is blocked, not just our POST).
+        # A 4xx status does NOT prove edge rejection — the PHP application
+        # itself can return 403/404 after fully parsing the body. Even a
+        # matching GET→403 doesn't prove WHERE the rejection happened.
+        # Always report as PROBE-REJECTED (inconclusive) unless version
+        # evidence independently resolves the verdict.
         get_status = _simple_get(url, timeout=10)
-        if get_status in REJECTED_STATUSES:
-            result["verdict"] = "MITIGATED-AT-EDGE"
-            result["exit_code"] = 0
-            result["reason"] = (f"POST→{status} AND GET→{get_status}: path "
-                               f"blocked at edge (WAF/CDN)")
-        else:
-            result["verdict"] = "PROBE-REJECTED"
-            result["exit_code"] = 2
-            result["reason"] = (f"POST→{status} but GET→{get_status}: application "
-                               f"may have parsed the body; patch status unknown")
-            if powered_by:
-                ver = _version_verdict(powered_by)
-                if ver == "FIXED":
-                    result["verdict"] = "PATCHED (by version)"
-                    result["exit_code"] = 0
-                    result["reason"] += f"; X-Powered-By reports patched: {powered_by}"
-                elif ver == "VULNERABLE":
-                    result["verdict"] = "VULNERABLE (by version)"
-                    result["exit_code"] = 1
-                    result["reason"] += f"; X-Powered-By reports unpatched: {powered_by}"
+        result["verdict"] = "PROBE-REJECTED"
+        result["exit_code"] = 2
+        result["reason"] = (f"POST→{status}, GET→{get_status}: rejection "
+                           f"layer unknown (WAF or application)")
+        # Version evidence can still resolve independently of the probe
+        if powered_by:
+            ver = _version_verdict(powered_by)
+            if ver == "FIXED":
+                result["verdict"] = "PATCHED (by version)"
+                result["exit_code"] = 0
+                result["reason"] = f"X-Powered-By reports patched: {powered_by}"
+            elif ver == "VULNERABLE":
+                result["verdict"] = "VULNERABLE (by version)"
+                result["exit_code"] = 1
+                result["reason"] = f"X-Powered-By reports unpatched: {powered_by}"
     else:
         ver = _version_verdict(powered_by)
         if ver == "VULNERABLE":
@@ -225,7 +221,7 @@ def bulk_scan(urls, threads=10, output=None):
     # summary — categories must sum to total (no orphans)
     vulnerable  = [r for r in results if r["verdict"].startswith("VULNERABLE")]
     confirmed_patched = [r for r in results if r["verdict"] in ("PATCHED", "PATCHED (by version)")]
-    edge_rejected = [r for r in results if "MITIGATED" in r["verdict"]]
+    edge_rejected = [r for r in results if "MITIGATED" in r["verdict"] or "PROBE-REJECTED" in r["verdict"]]
     inconclusive = [r for r in results if r["exit_code"] == 2 and r not in vulnerable + confirmed_patched + edge_rejected]
     print(f"\n[*] RESULTS: {len(vulnerable)} vulnerable | "
           f"{len(confirmed_patched)} patched | "

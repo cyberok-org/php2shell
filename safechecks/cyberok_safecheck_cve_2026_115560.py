@@ -144,22 +144,30 @@ def main():
         with open(a.ini) as f:
             for line in f:
                 line = line.strip()
+                # Strip inline comments (php.ini syntax: ; comment)
+                if ";" in line:
+                    line = line[:line.index(";")].strip()
                 if line.startswith("session.serialize_handler"):
                     handler = line.split("=", 1)[1].strip().strip("'\"")
                 elif line.startswith("session.upload_progress.enabled"):
                     progress = line.split("=", 1)[1].strip().strip("'\"")
+                    # PHP INI booleans: recognize all Off/false/0 variants
+                    if progress.lower() in ("off", "false", "0", "no", "none"):
+                        progress = "0"
 
         print(f"  session.serialize_handler = {handler!r}")
         print(f"  session.upload_progress.enabled = {progress!r}")
 
-        if progress in ("0", "Off", "off"):
+        # Normalize progress boolean
+        progress_disabled = str(progress).lower() in ("0", "off", "false", "no", "none")
+        if progress_disabled:
             print("\nVERDICT: SURFACE CLOSED (upload_progress disabled)")
             return 0
-        elif handler in ("php_binary", "php_serialize") and progress != "0":
+        elif handler in ("php_binary", "php_serialize"):
             print("\nVERDICT: PRECONDITIONS MET (audit app code for ini_set)")
             return 1
         else:
-            print("\nVERDICT: check application code for runtime handler switch")
+            print("\nVERDICT: PARTIALLY EXPOSED (handler safe, check runtime switch)")
             return 0
 
 

@@ -121,12 +121,15 @@ def check_production_config(config):
         handler = "php"  # documented default
 
     exposed = []
-    if upload_enabled:
-        exposed.append("upload_progress.enabled=1 (surface reachable)")
-        cleanup = config.get("session.upload_progress.cleanup", "")
-        # "" means On (default), "0" means Off
-        if cleanup == "0":
-            exposed.append("upload_progress.cleanup=0 (poisoning persists)")
+    if not upload_enabled:
+        # Progress disabled = surface closed regardless of handler
+        return exposed, False
+    exposed.append("upload_progress.enabled=1 (surface reachable)")
+    cleanup = config.get("session.upload_progress.cleanup", "")
+    # ini_get returns "" for On/true; "0" means Off
+    if cleanup in ("0",):
+        exposed.append("upload_progress.cleanup=0 (poisoning persists)")
+    # Handler is only a precondition when progress is enabled
     if handler in ("php_binary", "php_serialize"):
         exposed.append(f"serialize_handler={handler!r} (CVE-2026-115560 precondition)")
 

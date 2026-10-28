@@ -104,9 +104,9 @@ without adding `memory_hard_limit_percent`, so absence of that directive
 does NOT prove vulnerability.
 
 Official fixes exist only for supported branches (8.2.35 / 8.3.36 / 8.4.27 /
-8.5.12+). EOL branches will never receive an upstream fix, so for them the
+8.5.12+). EOL branches have source backports available, so for them the
 behavioural check confirms "the vulnerable behaviour is live", not
-"patched vs unpatched" — there is no patched EOL state to distinguish.
+"patched vs unpatched" — verify your distribution's backport status to distinguish.
 Verified vulnerable by direct testing: 5.6.40, 7.0.33, 7.2.34, 7.3.33,
 7.4.33, 8.0.30, 8.1.34 (109619 local fires on all of them; the remote
 signature works with `display_startup_errors=On`).
