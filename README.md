@@ -18,11 +18,12 @@ without adding that directive).
 
 | Component | Files | Description |
 |---|---|---|
-| **Safechecks** | 3 Python scripts | Behavioural vulnerability checks (local + remote + bulk scan). See [`safechecks/README.md`](safechecks/README.md) for full documentation. |
+| **Safechecks** | 4 Python scripts | Behavioural vulnerability and configuration checks (local + remote + bulk scan). See [`safechecks/README.md`](safechecks/README.md) for full documentation. |
 | **Suricata** | 1 rules file (21 signatures) | HTTP request/response signatures for Snort/Suricata. Validated on real exploit traffic (mod_php + FPM). |
-| **ModSecurity** | 1 config file (23 rules) | WAF rules on parsed variables. Includes response-side behavioural detection and SAPI-specific crash-signal documentation. |
+| **ModSecurity** | 1 config file (21 rules) | WAF rules on parsed variables. Includes response-side behavioural detection and SAPI-specific crash-signal documentation. |
 | **Nuclei** | 4 templates (behavioural + surface + EOL + startup-surface) |
 | **Sigma** | 4 SIEM rules (HTTP exploit, PHP OOM, session decode, process creation) | Non-destructive behavioural detection with multi-path payloads. |
+| **Host hunt** | 7 YARA rules, dated IOC manifest, Python runner and 25 regression tests | Read-only filesystem triage of webroots, PHP session files, temporary artifacts and decoded request captures. See [`host-hunt/README.md`](host-hunt/README.md) / [Русский](host-hunt/README.ru.md). |
 
 ## Quick start
 
@@ -73,7 +74,7 @@ nuclei -t nuclei/cyberok_php2shell_detect.yaml -u https://target/
 
 ## Detection coverage
 
-### Suricata signatures (14)
+### Suricata signatures (21)
 
 | SID | Detection | Vector |
 |---|---|---|
@@ -85,7 +86,7 @@ nuclei -t nuclei/cyberok_php2shell_detect.yaml -u https://target/
 | 6106 | Serialized payload in UPLOAD_PROGRESS | 109619 (poisoning) |
 | 6107 | Payload in multipart filename | 109619 (carrier) |
 | 6108 | PHPSESSID as form field | 109619 (sid injection) |
-| 6109 | Part flood (>500 parts) | Heap grooming |
+| 6109 | 10+ consecutive Content-Disposition headers | Header-run anomaly; not a total multipart-part counter |
 | 6110 | Handler-mismatch seed (pipe+serialized) | 109619 (handler mismatch) |
 | 6111 | Set-Cookie PHPSESSID leak oracle | 109618 (response-side) |
 | 6112 | Giant multipart filename (>4000 chars) | 109618 arm |
@@ -97,8 +98,9 @@ nuclei -t nuclei/cyberok_php2shell_detect.yaml -u https://target/
 | 6118 | Failed to decode session object | 109619 (response-side) |
 | 6119 | Post-exploit webshell access (p2s_*) | Post-exploit IoC |
 | 6120 | Post-exploit marker (SHELL_ALIVE) | Post-exploit IoC |
+| 6121 | Serialized integer-key collision sequence | Captured exploit request pattern (Corelight-derived) |
 
-### ModSecurity rules (18)
+### ModSecurity rules (21)
 
 Request-side (phase 1–2): matching Suricata coverage on parsed variables +
 robust occurrence counting. Response-side (phase 3/4): behavioural detection
@@ -106,8 +108,48 @@ via three-warning signature, OOM indicator, session-decode failure, and
 post-exploit markers. Includes SAPI-specific crash-signal taxonomy
 (mod_php vs FPM) and rejected-statuses troubleshooting guide.
 
+### Host hunt
+
+Use filesystem evidence alongside the existing event-based Sigma rules. The
+host-hunt rules distinguish exact known malware sample hashes, public PoC
+content, suspicious session data and generic PHP execution patterns. A match
+requires investigation; it does not automatically prove execution or attribute
+initial access to these CVEs. Each IOC records its source and role.
+
+From the repository root, using actual paths from the PHP instance or a mounted
+snapshot:
+
+```bash
+python3 -m venv host-hunt/.venv
+host-hunt/.venv/bin/python -m pip install -r host-hunt/requirements.txt
+host-hunt/.venv/bin/python host-hunt/hosthunt.py \
+  --webroot /mnt/server/var/www/html \
+  --session-dir /mnt/server/var/lib/php/sessions \
+  --artifact-dir /mnt/server/tmp \
+  > host-hunt/findings.jsonl
+
+# Offline regression tests; no PHP or malware is executed:
+host-hunt/.venv/bin/python -m unittest discover -s host-hunt -p 'test_*.py' -v
+```
+
+The runner outputs paths, hashes and rule metadata without session contents.
+Exit `1` means findings (also inspect `incomplete`); `2` means incomplete without
+findings; `0` means no match in the scanned scope. Unreadable, oversized,
+changing, archived and symlinked files are reported as skipped. Filesystem
+scanning does not cover process memory, deleted artifacts or Redis/Memcached
+session stores. See the [host-hunt guide](host-hunt/README.md) for scope, limits
+and log-search examples.
+
 ## Detection notes
 
+- **Sigma telemetry**: the HTTP rule needs `http_request_body`; standard nginx
+  combined access logs do not contain request bodies or cookies. Process rules
+  require process-creation telemetry and backend field mapping. YARA supplies
+  complementary disk evidence, not missing historical events.
+- **PoC provenance**: `p2s_8512_shell.php` and `SHELL_ALIVE` belong to different
+  public PoCs. Host-hunt detects them separately. Authorized checks and research
+  fixtures may match; known test markers are reported, never automatically
+  suppressed. A negative scan does not establish that a host was uncompromised.
 - **Suricata counting caveat**: occurrence counting (`{N,}`) over variable-gap
   multipart units is unreliable under PCRE2 + inspect windows — the Suricata
   set uses unit signatures; robust counting lives in ModSecurity.
@@ -138,6 +180,8 @@ post-exploit markers. Includes SAPI-specific crash-signal taxonomy
 | ModSecurity patterns | Desk-verified against exact trigger bytes |
 | phpMyAdmin retest | Technique validated (Assetnote) |
 | ikow rules comparison | 10/12 covered by our set; 2 gaps (threshold-recon, version-inventory) noted |
+| Host-hunt YARA | 7 rules compile without warnings in yara-python 4.5.4 |
+| Host-hunt regression tests | 25/25 offline tests passed; synthetic positives/negatives and runner coverage/error semantics. No real-malware execution or clean-application FP corpus. |
 
 ## References
 

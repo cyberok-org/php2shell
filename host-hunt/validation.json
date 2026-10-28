@@ -1,0 +1,14 @@
+{
+  "reviewed_on": "2026-10-28",
+  "python": "3.12.14",
+  "yara_python": "4.5.4",
+  "rules_compiled": 7,
+  "compile_warnings": 0,
+  "tests_run": 25,
+  "tests_passed": 25,
+  "tests_failed": 0,
+  "test_command": "python -m unittest discover -s host-hunt -p 'test_*.py' -v",
+  "scope": "Synthetic byte fixtures and local runner tests; no real malware samples, PHP execution, target network traffic, or real-application FP corpus",
+  "hash_test": "Benign digest substituted into in-memory copy of the exact-hash rule; published sample digests also checked against iocs.json",
+  "test_working_directory": "repository root"
+}

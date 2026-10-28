@@ -1,0 +1,119 @@
+{
+  "schema_version": 1,
+  "reviewed_on": "2026-10-28",
+  "purpose": "Offline defensive hunt leads. Do not use a contact/string match as an automatic compromise verdict.",
+  "caveats": [
+    "Indicators are a dated snapshot, not a universal infection signature.",
+    "Payload sources include emulated PHP sensors and separate malware sandboxing; sample identity does not prove the initial access vector.",
+    "HTTP request-body hashes are intentionally excluded from the malware file hash list.",
+    "No live lookup or download is performed by the runner."
+  ],
+  "file_sha256": [
+    {
+      "sha256": "4d02f14d109458cb0d696b65456918fcd724ca385aa30c688f08554c8899938c",
+      "artifact": "69-byte loader served at /s",
+      "evidence": "published_malicious_sample",
+      "source": "https://cowrai.com/research/php2shell-godofthunder/",
+      "observed_on": "2026-10-22"
+    },
+    {
+      "sha256": "0c5486f06620e26e316f4b33f318b0d646d5e1133789331aa2fed012360d1486",
+      "artifact": "179632-byte x86-64 ELF bot served at /nfs",
+      "evidence": "published_malicious_sample",
+      "source": "https://cowrai.com/research/php2shell-godofthunder/",
+      "observed_on": "2026-10-22"
+    }
+  ],
+  "network": [
+    {
+      "value": "92.118.112.100",
+      "type": "ipv4",
+      "role": "payload_distribution",
+      "paths": [
+        "/s",
+        "/nfs"
+      ],
+      "source": "https://cowrai.com/research/php2shell-godofthunder/",
+      "observed_on": "2026-10-22"
+    },
+    {
+      "value": "thunder.godofthunder.st",
+      "type": "domain",
+      "role": "bot_C2_observed_in_sandbox",
+      "source": "https://cowrai.com/research/php2shell-godofthunder/",
+      "observed_on": "2026-10-22"
+    },
+    {
+      "value": "134.199.154.64",
+      "type": "ipv4",
+      "port": 50792,
+      "role": "bot_C2_observed_in_sandbox",
+      "source": "https://cowrai.com/research/php2shell-godofthunder/",
+      "observed_on": "2026-10-22"
+    },
+    {
+      "value": "15.204.59.70",
+      "type": "ipv4",
+      "role": "source_and_callback_host_in_process_confirmed_honeypot_RCE",
+      "source": "https://github.com/0x4D31/honeypot-data/blob/main/reports/php2shell/2026-10-24-confirmed-rce.md",
+      "observed_on": "2026-10-24"
+    },
+    {
+      "value": "162.35.99.94",
+      "type": "ipv4",
+      "role": "source_and_callback_host_in_process_confirmed_honeypot_RCE",
+      "source": "https://github.com/0x4D31/honeypot-data/blob/main/reports/php2shell/2026-10-24-confirmed-rce.md",
+      "observed_on": "2026-10-24"
+    }
+  ],
+  "paths": [
+    {
+      "value": "/tmp/nfs",
+      "role": "associated_bot_path",
+      "evidence": "name_only_is_weak",
+      "source": "https://cowrai.com/research/php2shell-godofthunder/"
+    },
+    {
+      "value": "/tmp/x1",
+      "role": "execution_proof_file_in_honeypot",
+      "evidence": "name_only_is_weak",
+      "source": "https://github.com/0x4D31/honeypot-data/blob/main/reports/php2shell/2026-10-24-confirmed-rce.md"
+    },
+    {
+      "value": "p2s_8512_shell.php",
+      "role": "public_PoC_default_filename",
+      "evidence": "inspect_content_and_authorized_testing_context",
+      "source": "https://github.com/rafalohaki/php2shell-poc/blob/6102cff317b4b7ae9188fc8e82f6a4a64e6fd950/php2shell-8512/exploit/php2shell_8512.py"
+    }
+  ],
+  "public_poc_markers": [
+    {
+      "value": "SHELL_ALIVE",
+      "role": "session_backed_LFI_PoC_marker_not_8512_drop_marker",
+      "source": "https://github.com/rafalohaki/php2shell-poc/blob/6102cff317b4b7ae9188fc8e82f6a4a64e6fd950/webshell/session_webshell.py"
+    },
+    {
+      "value": "PAYLOAD_PERSISTED sid=",
+      "role": "session_backed_LFI_PoC_marker",
+      "source": "https://github.com/rafalohaki/php2shell-poc/blob/6102cff317b4b7ae9188fc8e82f6a4a64e6fd950/webshell/session_webshell.py"
+    },
+    {
+      "value": "O:14:\"DeferredWriter\"",
+      "role": "lab_gadget_serialized_seed_not_execution_proof",
+      "source": "https://github.com/rafalohaki/php2shell-poc/blob/6102cff317b4b7ae9188fc8e82f6a4a64e6fd950/php2shell-8512/exploit/php2shell_8512.py"
+    },
+    {
+      "value": "P2S8512BOUNDARY",
+      "role": "public_PoC_multipart_boundary",
+      "source": "https://github.com/rafalohaki/php2shell-poc/blob/6102cff317b4b7ae9188fc8e82f6a4a64e6fd950/php2shell-8512/exploit/php2shell_8512.py"
+    }
+  ],
+  "known_check_markers": {
+    "values": [
+      "SC109619",
+      "ZZ_POSTPATCH_MARKER",
+      "cyberok_test"
+    ],
+    "interpretation": "Reported for context only; never automatically suppress a finding."
+  }
+}
