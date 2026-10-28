@@ -132,13 +132,17 @@ def remote_check(url, verbose=True):
         return result
 
     # phpMyAdmin special case (Assetnote technique)
+    probe_url = url  # track the ACTUAL URL we probed
     if PHPMYADMIN_MARKER in body:
         # retest at show_config_errors.php
         pma_url = url.rstrip("/") + SHOW_CONFIG_ERRORS
         status2, body2, pb2 = _probe_url(pma_url)
         if status2 is not None:
             status, body, powered_by = status2, body2, pb2 or powered_by
+            probe_url = pma_url
             result["retested_at"] = pma_url
+            result["status"] = status2
+            result["powered_by"] = pb2 or powered_by
 
     resp_text = body.decode("utf-8", "replace")
     low = resp_text.lower()
@@ -168,7 +172,7 @@ def remote_check(url, verbose=True):
         # matching GET→403 doesn't prove WHERE the rejection happened.
         # Always report as PROBE-REJECTED (inconclusive) unless version
         # evidence independently resolves the verdict.
-        get_status = _simple_get(url, timeout=10)
+        get_status = _simple_get(probe_url, timeout=10)
         result["verdict"] = "PROBE-REJECTED"
         result["exit_code"] = 2
         result["reason"] = (f"POST→{status}, GET→{get_status}: rejection "
@@ -218,14 +222,13 @@ def bulk_scan(urls, threads=10, output=None):
     url_order = {u: i for i, u in enumerate(urls)}
     results.sort(key=lambda r: url_order.get(r["url"], 999))
 
-    # summary — categories must sum to total (no orphans)
-    vulnerable  = [r for r in results if r["verdict"].startswith("VULNERABLE")]
-    confirmed_patched = [r for r in results if r["verdict"] in ("PATCHED", "PATCHED (by version)")]
-    edge_rejected = [r for r in results if "MITIGATED" in r["verdict"] or "PROBE-REJECTED" in r["verdict"]]
-    inconclusive = [r for r in results if r["exit_code"] == 2 and r not in vulnerable + confirmed_patched + edge_rejected]
+    # summary — categories are display-only; exit code is computed
+    # independently from individual exit_codes (no aggregation bugs possible)
+    vulnerable  = [r for r in results if r["exit_code"] == 1]
+    patched = [r for r in results if r["exit_code"] == 0]
+    inconclusive = [r for r in results if r["exit_code"] == 2]
     print(f"\n[*] RESULTS: {len(vulnerable)} vulnerable | "
-          f"{len(confirmed_patched)} patched | "
-          f"{len(edge_rejected)} edge_rejected | "
+          f"{len(patched)} patched | "
           f"{len(inconclusive)} inconclusive | "
           f"total={len(results)}")
 
@@ -235,18 +238,20 @@ def bulk_scan(urls, threads=10, output=None):
             json.dump({"scanned_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
                        "total": len(results),
                        "vulnerable": len(vulnerable),
-                       "patched": len(confirmed_patched),
-                       "edge_rejected": len(edge_rejected),
+                       "patched": len(patched),
                        "inconclusive": len(inconclusive),
-                       "categories_sum_check": len(vulnerable) + len(confirmed_patched) + len(edge_rejected) + len(inconclusive),
+                       "categories_sum_check": len(vulnerable) + len(patched) + len(inconclusive),
                        "results": results}, f, indent=2)
         print(f"[*] results saved to {output}")
 
-    # exit 1 only when at least one is VULNERABLE; exit 0 only when ALL are
-    # confirmed_patched or edge_rejected (no inconclusive); else exit 2
-    if vulnerable:
+    # Exit code computed directly from individual results — cannot lose
+    # uncertainty regardless of how display categories are named.
+    #   any exit_code==1 → 1 (vulnerable found)
+    #   any exit_code==2 → 2 (at least one unknown, none vulnerable)
+    #   all exit_code==0 → 0 (all confirmed safe)
+    if any(r["exit_code"] == 1 for r in results):
         return 1
-    if inconclusive:
+    if any(r["exit_code"] == 2 for r in results):
         return 2
     return 0
 

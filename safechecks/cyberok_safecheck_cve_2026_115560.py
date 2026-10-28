@@ -158,8 +158,21 @@ def main():
         print(f"  session.serialize_handler = {handler!r}")
         print(f"  session.upload_progress.enabled = {progress!r}")
 
-        # Normalize progress boolean
-        progress_disabled = str(progress).lower() in ("0", "off", "false", "no", "none")
+        # Handle missing directives: Python None means the directive was
+        # not found in the ini file — NOT that it's disabled.
+        # PHP default for upload_progress.enabled is 1 (enabled).
+        if progress is None:
+            # Directive absent: use PHP documented default (enabled=1)
+            # but note that the ini file may be incomplete
+            print("  (directive absent — PHP default is enabled=1)")
+            progress = "1"
+        if handler is None:
+            # Directive absent: PHP default serialize_handler is 'php'
+            print("  (directive absent — PHP default is 'php')")
+            handler = "php"
+
+        # Normalize progress boolean (INI values, not Python None)
+        progress_disabled = str(progress).lower() in ("0", "off", "false", "no")
         if progress_disabled:
             print("\nVERDICT: SURFACE CLOSED (upload_progress disabled)")
             return 0

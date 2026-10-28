@@ -64,11 +64,11 @@ alert http $EXTERNAL_NET any -> $HOME_NET $HTTP_PORTS (msg:"PHP-UP-2026 CVE-2026
 # [A-Za-z0-9,-] charset validator rejects it on both versions.
 alert http $EXTERNAL_NET any -> $HOME_NET $HTTP_PORTS (msg:"PHP-UP-2026 PHPSESSID supplied as multipart form field (sid injection)"; flow:established,to_server; http.method; content:"POST"; http.request_body; content:"name=\"PHPSESSID\""; nocase; classtype:web-application-attack; sid:1000006108; rev:1; metadata:created_at 2026_10_21, cve CVE-2026-109619;)
 
-# --- heap-grooming: multipart part flood (>500 parts) --------------------------
-# The CVE exploit chain (xue-poc/remote_cve.py) sends 1000+ parts per request
-# (3KB each + a 12MB "big" part ≈ 15MB per POST) to groom the ZendMM heap.
-# Legitimate forms rarely exceed 50 parts; >500 is a strong attack signal.
-# Matches on repeated Content-Disposition lines (each multipart part has one).
+# --- anomaly: consecutive Content-Disposition header lines ----------------------
+# Detects 10+ immediately adjacent Content-Disposition headers (no body or
+# boundary between them). This is a header-run anomaly, NOT a total part
+# counter — real multipart has body+boundary between CD lines. For total
+# part counting, use the ModSecurity &ARGS rule (1006115).
 alert http $EXTERNAL_NET any -> $HOME_NET $HTTP_PORTS (msg:"PHP-UP-2026 multipart consecutive Content-Disposition headers (10+, header-run anomaly)"; flow:established,to_server; http.method; content:"POST"; http.request_body; pcre:"/(Content-Disposition\x3a form-data\x3b[^\r\n]{0,200}\r\n){10,}/"; classtype:attempted-dos; sid:1000006109; rev:1; metadata:created_at 2026_10_21, cve CVE-2026-109618;)
 
 # --- handler-mismatch seed: pipe-prefixed serialized payload in progress value ---
