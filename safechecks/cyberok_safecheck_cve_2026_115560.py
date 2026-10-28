@@ -172,7 +172,9 @@ def main():
             handler = "php"
 
         # Normalize progress boolean (INI values, not Python None)
-        progress_disabled = str(progress).lower() in ("0", "off", "false", "no")
+        # Empty string "" in a php.ini boolean directive means Off
+        # (e.g., `session.upload_progress.enabled = ""`)
+        progress_disabled = progress == "" or str(progress).lower() in ("0", "off", "false", "no")
         if progress_disabled:
             print("\nVERDICT: SURFACE CLOSED (upload_progress disabled)")
             return 0

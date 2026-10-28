@@ -126,10 +126,11 @@ def check_production_config(config):
         return exposed, False
     exposed.append("upload_progress.enabled=1 (surface reachable)")
     cleanup = config.get("session.upload_progress.cleanup", "")
-    # ini_get returns "" for the default value (On); explicit "0" means Off.
-    # Only explicit "0"/"Off" disables persistence — empty string does NOT.
-    if cleanup.lower() in ("0", "off", "false", "no"):
-        exposed.append(f"upload_progress.cleanup={cleanup!r} (poisoning persists)")
+    # ini_get() may return "" for Off booleans (PHP manual) or "0" (PHP 8.3+).
+    # Both mean cleanup is disabled → poisoning persists.
+    # "1" or non-empty truthy = cleanup enabled (default).
+    if cleanup == "" or cleanup.lower() in ("0", "off", "false", "no"):
+        exposed.append("upload_progress.cleanup disabled (poisoning persists)")
     # Handler is only a precondition when progress is enabled
     if handler in ("php_binary", "php_serialize"):
         exposed.append(f"serialize_handler={handler!r} (CVE-2026-115560 precondition)")

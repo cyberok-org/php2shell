@@ -52,8 +52,11 @@ removes the write attempt.
 **Verdicts**:
 - `VULNERABLE` — w1 + w3 signature present (rc=1)
 - `PATCHED` — w1 + w2 without the write attempt (rc=0)
-- `MITIGATED-AT-EDGE` — 400/403/413/429 from WAF/CDN before PHP (rc=0)
-- `VULNERABLE (by version)` — no crash but X-Powered-By shows unpatched (rc=1)
+- `PROBE-REJECTED` — probe returned 4xx but rejection layer unknown (rc=2).
+  A 403/404 does NOT prove edge blocking — the application itself can
+  return 4xx after fully parsing the body. Version evidence (X-Powered-By)
+  can independently resolve this to PATCHED/VULNERABLE (by version).
+- `VULNERABLE (by version)` — X-Powered-By shows unpatched (rc=1)
 - `PATCHED (by version)` — X-Powered-By shows patched release (rc=0)
 - `INCONCLUSIVE` — no warnings, no version (display_errors=Off?) (rc=2)
 
@@ -157,11 +160,12 @@ Mitigation: `session.upload_progress.enabled = 0`
 
 | Code | Meaning |
 |---|---|
-| 0 | SAFE / PATCHED / MITIGATED |
+| 0 | SAFE / PATCHED (confirmed, incl. by version) |
 | 1 | VULNERABLE / AFFECTED / SURFACE EXPOSED |
-| 2 | INCONCLUSIVE |
+| 2 | INCONCLUSIVE / PROBE-REJECTED |
 
-With bulk mode: returns 1 if ANY target is vulnerable, else 0.
+With bulk mode: returns 1 if ANY target is vulnerable, 2 if any is
+inconclusive (and none vulnerable), 0 only when ALL are confirmed safe.
 
 ## JSON output format
 
