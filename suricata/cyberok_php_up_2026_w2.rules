@@ -1,0 +1,417 @@
+# ------------------------------------------------------------------------
+# CyberOK — php2shell defense tools, wave 2 (PHP security release 2026-11-19:
+# 8.2.36 / 8.3.37 / 8.4.28 / 8.5.13)
+#
+# (c) 2026 АО «Сайбер ОК» / JSC CyberOK
+# Материал предоставляется исключительно для ознакомительных и исследовательских целей.
+# Копирование, переработка, распространение, переопубликация и использование материала
+# полностью или частично в коммерческих целях, включая создание и продвижение
+# конкурирующих продуктов, запрещены без предварительного письменного разрешения
+# правообладателя.
+#
+# Provided for informational and research purposes only. Copying, modification,
+# distribution, republication, and use of this material in whole or in part for
+# commercial purposes, including the creation and promotion of competing products,
+# is prohibited without the prior written permission of the copyright holder.
+# ------------------------------------------------------------------------
+
+# Suricata 7 rules for the 2026-11-19 release, alert-only. SID space
+# 1000006200-1000006299 (no overlap with cyberok_php_up_2026.rules). Load both files.
+
+# ===== CVE-2026-129289 — PHP-FPM request smuggling =====
+# ------------------------------------------------------------------------
+# PHP-UP-2026-W2 — PHP-FPM request smuggling
+# CVE-2026-129289 / GHSA-qc49-hpvq-g2w6 (critical)
+# Suricata 7 rules, alert-only. Local SID range 1000006200-1000006219.
+# ------------------------------------------------------------------------
+#
+# Why body-level FastCGI framing is a good detector for this bug:
+#   The smuggled request is raw FastCGI records that PHP-FPM parses straight
+#   off the backend socket. Neither nginx nor PHP decodes anything in between
+#   (no Content-Encoding, no multipart Content-Transfer-Encoding), so the bytes
+#   MUST appear verbatim in the (de-chunked) HTTP request body. Suricata's
+#   http.request_body buffer is de-chunked, so chunked TE does not hide them.
+#
+# FastCGI wire facts used below (main/fastcgi.c, fcgi_read_request):
+#   record header : ver(>=1) type idB1 idB0 lenB1 lenB0 pad rsvd
+#   BEGIN_REQUEST : type 0x01, len 0x0008, body = roleB1 roleB0 flags 5*rsvd,
+#                   role must be 1..3 (00 01 RESPONDER) or PHP drops the conn
+#   PARAMS        : type 0x04, name-value pairs: nameLen valueLen name value,
+#                   lengths are 1 byte (<128) or 4 bytes (high bit set), and
+#                   NAME IS IMMEDIATELY FOLLOWED BY VALUE (no separator) — this
+#                   is what keeps 6202-6204 off human-readable configs/docs.
+#
+# Coverage limits:
+#   * libhtp request-body-limit (100kb in the stock suricata.yaml) — a smuggled
+#     record placed deeper than that is not inspected. Raise the limit on
+#     PHP-FPM fronts that use fastcgi_keep_conn / enablereuse.
+#   * TLS: needs decrypted traffic (sensor behind the TLS terminator).
+#   * Known FP class: uploads of pcaps / FastCGI test fixtures / fuzzing corpora
+#     that contain real FastCGI streams.
+
+# --- 6200: smuggled FastCGI request (BEGIN_REQUEST + NV SCRIPT_FILENAME) ----
+alert http any any -> $HOME_NET any (msg:"PHP-UP-2026-W2 CVE-2026-129289 FastCGI BEGIN_REQUEST + SCRIPT_FILENAME param inside HTTP request body (PHP-FPM request smuggling)"; flow:established,to_server; http.request_body; content:"SCRIPT_FILENAME"; fast_pattern; pcre:"/[\x01-\xff]\x01[\x00-\xff]{2}\x00\x08[\x00-\xff]{2}\x00[\x01-\x03]/"; pcre:"/\x0f(?:[\x00-\x7f]|[\x80-\xff][\x00-\xff]{3})SCRIPT_FILENAME/"; classtype:web-application-attack; sid:1000006200; rev:1; metadata:cve CVE-2026-129289, ghsa GHSA-qc49-hpvq-g2w6, created_at 2026_11_19, confidence High, signature_severity Critical;)
+
+# --- 6201: same, PATH_TRANSLATED variant (fpm_main.c:979 falls back to it) --
+alert http any any -> $HOME_NET any (msg:"PHP-UP-2026-W2 CVE-2026-129289 FastCGI BEGIN_REQUEST + PATH_TRANSLATED param inside HTTP request body (PHP-FPM request smuggling)"; flow:established,to_server; http.request_body; content:"PATH_TRANSLATED"; fast_pattern; pcre:"/[\x01-\xff]\x01[\x00-\xff]{2}\x00\x08[\x00-\xff]{2}\x00[\x01-\x03]/"; pcre:"/\x0f(?:[\x00-\x7f]|[\x80-\xff][\x00-\xff]{3})PATH_TRANSLATED/"; classtype:web-application-attack; sid:1000006201; rev:1; metadata:cve CVE-2026-129289, ghsa GHSA-qc49-hpvq-g2w6, created_at 2026_11_19, confidence High, signature_severity Critical;)
+
+# --- 6202: NV-encoded PHP_VALUE / PHP_ADMIN_VALUE (ini injection) ------------
+# FastCGI-only parameter names, length-prefixed and directly concatenated with
+# an ini "name=" value. Standalone (no BEGIN requirement) on purpose.
+alert http any any -> $HOME_NET any (msg:"PHP-UP-2026-W2 CVE-2026-129289 FastCGI PHP_VALUE/PHP_ADMIN_VALUE name-value pair inside HTTP request body (FPM ini injection)"; flow:established,to_server; http.request_body; content:"PHP_"; fast_pattern; pcre:"/(?:\x09(?:[\x00-\x7f]|[\x80-\xff][\x00-\xff]{3})PHP_VALUE|\x0f(?:[\x00-\x7f]|[\x80-\xff][\x00-\xff]{3})PHP_ADMIN_VALUE)[a-z_.]{3,64}\s*=/"; classtype:web-application-attack; sid:1000006202; rev:1; metadata:cve CVE-2026-129289, ghsa GHSA-qc49-hpvq-g2w6, created_at 2026_11_19, confidence High, signature_severity Critical;)
+
+# --- 6203: advisory code-exec chain directives in a PHP_(ADMIN_)VALUE pair ---
+alert http any any -> $HOME_NET any (msg:"PHP-UP-2026-W2 CVE-2026-129289 FastCGI PHP_VALUE carrying auto_prepend_file/allow_url_include (FPM smuggling to code execution)"; flow:established,to_server; http.request_body; content:"VALUE"; pcre:"/PHP_(?:ADMIN_)?VALUE[^\x00]{0,512}?(?:auto_prepend_file|auto_append_file|allow_url_include|open_basedir|disable_functions|extension_dir|extension|include_path)\s*=/"; pcre:"/(?:\x09|\x0f)(?:[\x00-\x7f]|[\x80-\xff][\x00-\xff]{3})PHP_(?:ADMIN_)?VALUE/"; classtype:web-application-attack; sid:1000006203; rev:1; metadata:cve CVE-2026-129289, ghsa GHSA-qc49-hpvq-g2w6, created_at 2026_11_19, confidence High, signature_severity Critical;)
+
+# --- 6204: forged client address: NV-encoded REMOTE_ADDR + IP literal -------
+alert http any any -> $HOME_NET any (msg:"PHP-UP-2026-W2 CVE-2026-129289 FastCGI REMOTE_ADDR param (forged client address) inside HTTP request body"; flow:established,to_server; http.request_body; content:"REMOTE_ADDR"; fast_pattern; pcre:"/\x0b(?:[\x02-\x2d]|[\x80-\xff]\x00\x00[\x02-\x2d])REMOTE_ADDR[0-9a-fA-F:.]{2,45}/"; pcre:"/[\x01-\xff]\x01[\x00-\xff]{2}\x00\x08[\x00-\xff]{2}\x00[\x01-\x03]/"; classtype:web-application-attack; sid:1000006204; rev:1; metadata:cve CVE-2026-129289, ghsa GHSA-qc49-hpvq-g2w6, created_at 2026_11_19, confidence High, signature_severity Major;)
+
+# --- 6205: HUNTING — bare FastCGI BEGIN_REQUEST(RESPONDER) + PARAMS header ----
+# No parameter anchor: catches smuggling attempts that use unusual param sets.
+# Short byte patterns -> higher MPM load and some FP exposure on large binary
+# uploads; measured 0 hits on the lab binary corpus.
+alert http any any -> $HOME_NET any (msg:"PHP-UP-2026-W2 CVE-2026-129289 HUNTING FastCGI BEGIN_REQUEST(RESPONDER)+PARAMS record pair inside HTTP request body"; flow:established,to_server; http.request_body; content:"|00 08|"; content:"|00 01|"; distance:2; within:2; pcre:"/[\x01-\xff]\x01[\x00-\xff]{2}\x00\x08[\x00-\xff]{2}\x00\x01[\x00-\xff]{6}[\x00-\xff]{0,255}?[\x01-\xff]\x04[\x00-\xff]{2}/"; classtype:web-application-attack; sid:1000006205; rev:1; metadata:cve CVE-2026-129289, ghsa GHSA-qc49-hpvq-g2w6, created_at 2026_11_19, confidence Medium, signature_severity Major;)
+
+# --- 6206: CONTEXT — PHP's predictable multipart stop primitive --------------
+# A multipart part whose Content-Disposition has neither name= nor filename=:
+# PHP's rfc1867 parser aborts ("File Upload Mime headers garbled") after its
+# first 5120-byte buffer fill, leaving the rest of the body unread — the
+# advisory's positioning primitive. Detects the PRIMITIVE, not a payload, so
+# it fires on same-shape benign probes by design. Low severity / hunting.
+alert http any any -> $HOME_NET any (msg:"PHP-UP-2026-W2 CVE-2026-129289 CONTEXT multipart part without name/filename (PHP rfc1867 early-stop primitive)"; flow:established,to_server; http.content_type; content:"multipart/form-data"; nocase; http.request_body; content:"form-data"; nocase; pcre:"/(?:^|\n)Content-Disposition[ \t]*:[ \t]*form-data[ \t]*(?:\;(?![ \t]*(?:file)?name[ \t]*=)[^\;\r\n]*)*\r?\n/i"; classtype:policy-violation; sid:1000006206; rev:1; metadata:cve CVE-2026-129289, ghsa GHSA-qc49-hpvq-g2w6, created_at 2026_11_19, confidence Low, signature_severity Minor;)
+
+# ===== CVE-2026-115560 / 126714 / 129481 / 129182 / 129474 — session engine, fatal-backtrace lifetime =====
+# ------------------------------------------------------------------------
+# CyberOK — PHP-UP-2026-W2 (2026-11-19 PHP security release):
+# session engine / fatal-backtrace lifetime.
+#   CVE-2026-115560 GHSA-658j-r8rw-q6mx  session serializer mismatch via upload progress
+#   CVE-2026-126714 GHSA-fm2m-fjf5-v3cp  partially overwritten session file
+#   CVE-2026-129481 GHSA-g3vh-838c-65v7  stale PS(session_started_filename) (host-side only)
+#   CVE-2026-129182 GHSA-2fjv-p558-g82m  last_fatal_error_backtrace repopulated in shutdown
+#   CVE-2026-129474 GHSA-8mjj-2r7p-4hg2  UAF in debug_backtrace_get_args() on trampolines
+# Local SID space 1000006220-1000006239. Alert-only. Suricata 7 keywords.
+# Companion to the October kit (1000006100-1000006121): 6106/6107/6110/6113
+# stay deployed; the rules below close the encoding gaps measured against them
+# (each variant was replayed: fire on its trigger, silent on benign traffic).
+# ------------------------------------------------------------------------
+
+# --- CVE-2026-115560: serializer-mismatch seed in the upload-progress value ----------
+# The value of the PHP_SESSION_UPLOAD_PROGRESS part becomes the session KEY
+# "upload_progress_<value>". Read back with the `php` serializer, a '|' in the
+# key splits it and the bytes after it are unserialized.
+# Gap closed vs 6106/6110: tolerant to (a) unquoted name=, (b) extra part headers
+# (Content-Type etc.) between Content-Disposition and the blank line, (c) CR/LF
+# inside the value before the '|', (d) seed deeper than 1024 bytes into the value. Possessive/atomic
+# groups keep PCRE2 inside Suricata's match limits on multi-KB values.
+alert http $EXTERNAL_NET any -> $HOME_NET $HTTP_PORTS (msg:"PHP-UP-2026-W2 CVE-2026-115560 serializer-mismatch seed (pipe + serialized value) in PHP_SESSION_UPLOAD_PROGRESS"; flow:established,to_server; http.method; content:"POST"; http.request_body; content:"PHP_SESSION_UPLOAD_PROGRESS"; fast_pattern; pcre:"/name\s*=\s*\x22?PHP_SESSION_UPLOAD_PROGRESS\x22?[^\r\n]*\r\n(?:[^\r\n]+\r\n){0,8}\r\n(?>[^|\r]+|\r(?!\n--)|\|(?![OCasiRrdb]\x3a))*+\|(?:[OC]\x3a\d{1,5}\x3a\x22|a\x3a\d{1,7}\x3a\x7b|s\x3a\d{1,9}\x3a\x22|[iRrdb]\x3a[\d\x2d])/"; classtype:web-application-attack; sid:1000006220; rev:1; metadata:cve CVE-2026-115560, created_at 2026_11_19;)
+
+# Object syntax ANYWHERE in the upload-progress value, no '|' needed:
+#  - php writer read by a php_binary reader: byte0 'u'(117) is taken as the key
+#    length, the object sits at value offset 102 (validated in lab, both builds);
+#  - php_serialize writer read by php_binary: object at value offset ~70;
+#  - record-spanning payloads (advisory: the 127-byte php_binary key limit does
+#    not stop payloads spanning several records) put the object in a later value.
+alert http $EXTERNAL_NET any -> $HOME_NET $HTTP_PORTS (msg:"PHP-UP-2026-W2 CVE-2026-115560 serialized object syntax inside PHP_SESSION_UPLOAD_PROGRESS value (any reader)"; flow:established,to_server; http.method; content:"POST"; http.request_body; content:"PHP_SESSION_UPLOAD_PROGRESS"; fast_pattern; pcre:"/name\s*=\s*\x22?PHP_SESSION_UPLOAD_PROGRESS\x22?[^\r\n]*\r\n(?:[^\r\n]+\r\n){0,8}\r\n(?>[^OC\r]+|[OC](?!\x3a\d{1,5}\x3a\x22)|\r(?!\n--))*+[OC]\x3a\d{1,5}\x3a\x22[A-Za-z_\x5c\x80-\xff]/"; classtype:web-application-attack; sid:1000006221; rev:1; metadata:cve CVE-2026-115560, created_at 2026_11_19;)
+
+# Evasive part encoding of the upload-progress field itself (anomaly, low
+# severity): unquoted name or extra headers inside the part. Browsers and the
+# documented upload-progress JS pattern always send the quoted, header-less form.
+alert http $EXTERNAL_NET any -> $HOME_NET $HTTP_PORTS (msg:"PHP-UP-2026-W2 CVE-2026-115560 PHP_SESSION_UPLOAD_PROGRESS part with non-canonical encoding (unquoted name / extra part headers)"; flow:established,to_server; http.method; content:"POST"; http.request_body; content:"PHP_SESSION_UPLOAD_PROGRESS"; fast_pattern; pcre:"/name\s*=\s*(?:PHP_SESSION_UPLOAD_PROGRESS|\x22PHP_SESSION_UPLOAD_PROGRESS\x22[^\r\n]*\r\n[^\r\n]+\r\n)/"; classtype:web-application-activity; sid:1000006222; rev:1; metadata:cve CVE-2026-115560, created_at 2026_11_19;)
+
+# Oversized upload-progress value (> 512 bytes): legitimate values are short
+# form identifiers. Long values are the php_binary-reader offset trick, the
+# php_serialize no-limit carrier, and session-file growth for CVE-2026-126714.
+alert http $EXTERNAL_NET any -> $HOME_NET $HTTP_PORTS (msg:"PHP-UP-2026-W2 CVE-2026-115560/CVE-2026-126714 oversized PHP_SESSION_UPLOAD_PROGRESS value (>512 bytes)"; flow:established,to_server; http.method; content:"POST"; http.request_body; content:"PHP_SESSION_UPLOAD_PROGRESS"; fast_pattern; pcre:"/name\s*=\s*\x22?PHP_SESSION_UPLOAD_PROGRESS\x22?[^\r\n]*\r\n(?:[^\r\n]+\r\n){0,8}\r\n[^\r]{513}/"; classtype:attempted-user; sid:1000006223; rev:1; metadata:cve CVE-2026-115560, cve CVE-2026-126714, created_at 2026_11_19;)
+
+# --- CVE-2026-126714 (and any session-injection): php-session record seam -------------
+# An "old" session string planted for a partial-overwrite splice must contain the
+# php-serializer record seam  ";<name>|O:<n>:"  so that, once a truncated new
+# write moves the string boundary, the bytes after it parse as a new record.
+# Matches raw and percent-encoded bodies (urlencoded forms, JSON, multipart).
+alert http $EXTERNAL_NET any -> $HOME_NET $HTTP_PORTS (msg:"PHP-UP-2026-W2 CVE-2026-126714 php-session record seam with object in request body (session splice seed)"; flow:established,to_server; http.method; content:"POST"; http.request_body; pcre:"/(?:\x5c?\x22|%22)(?:\x3b|%3b)[A-Za-z0-9_\x2d]{0,64}(?:\||%7c)(?:O|C)(?:\x3a|%3a)\d{1,5}(?:\x3a|%3a)(?:\x5c?\x22|%22)/i"; classtype:web-application-attack; sid:1000006224; rev:1; metadata:cve CVE-2026-126714, cve CVE-2026-115560, created_at 2026_11_19;)
+
+# Filename carrier with a string-terminator + object (spanning from the progress
+# key into the progress "files" array, where the filename is stored verbatim).
+# Complements 6107, which needs the object inside an unescaped quoted filename.
+alert http $EXTERNAL_NET any -> $HOME_NET $HTTP_PORTS (msg:"PHP-UP-2026-W2 CVE-2026-115560 multipart filename with serialized terminator + object (upload-progress spanning carrier)"; flow:established,to_server; http.method; content:"POST"; http.request_body; content:"filename"; pcre:"/filename\s*=\s*\x22?[^\r\n]{0,512}?(?:\x5c\x22|\x22)\x3b[^\r\n]{0,64}[OC]\x3a\d{1,5}\x3a(?:\x5c\x22|\x22)/"; classtype:web-application-attack; sid:1000006225; rev:1; metadata:cve CVE-2026-115560, created_at 2026_11_19;)
+
+# --- CVE-2026-129182: FastCGI leg (frontend -> php-fpm) ------------------------------
+# Exploitation needs a diagnostic-producing PHP_VALUE / PHP_ADMIN_VALUE from the
+# frontend, and the late fatal needs per-request memory/backtrace/output settings.
+# Deploy on the internal nginx->FPM segment (TCP 9000 or your FPM port).
+alert tcp any any -> $HOME_NET 9000 (msg:"PHP-UP-2026-W2 CVE-2026-129182 FastCGI PHP_VALUE/PHP_ADMIN_VALUE touching fatal_error_backtraces/memory/output settings"; flow:established,to_server; content:"PHP_"; pcre:"/PHP_(?:ADMIN_)?VALUE[\s\S]{0,64}(?:fatal_error_backtraces|max_memory_limit|memory_limit|output_handler|zlib\.output_compression|date\.timezone)/"; classtype:policy-violation; sid:1000006226; rev:1; metadata:cve CVE-2026-129182, created_at 2026_11_19;)
+
+# --- CVE-2026-129474 / CVE-2026-129182 posture: fatal backtrace with arguments -------
+# PHP 8.5 prints "Stack trace:" under a Fatal error when fatal_error_backtraces=1;
+# argument values in frame #0 mean zend.exception_ignore_args=0 — the exact
+# precondition pair of CVE-2026-129474 (and display_errors=On on top).
+# Measured: 8.5 prints the fatal "Stack trace:" only with html_errors=0 (text
+# errors, typical for APIs / CLI-style error pages); with the SAPI default
+# html_errors=1 the displayed fatal carries no trace, so this rule is a narrow
+# posture signal — absence proves nothing. Uncaught exceptions with args also match
+# (same exception_ignore_args=0 precondition).
+alert http $HOME_NET $HTTP_PORTS -> $EXTERNAL_NET any (msg:"PHP-UP-2026-W2 CVE-2026-129474 posture: fatal error backtrace with arguments exposed (fatal_error_backtraces=1, exception_ignore_args=0)"; flow:established,to_client; http.response_body; content:"Fatal error"; content:"Stack trace:"; distance:0; within:600; pcre:"/Stack trace:(?:<br \/>)?\s*#0 (?:[^\r\n]{0,300}?\(\d+\)|\[internal function\]): [^\r\n(]{1,256}\((?:[\d'\x2d]|\x26#0?39\x3b|NULL|true|false|Array|Object)/"; classtype:misc-activity; sid:1000006227; rev:1; metadata:cve CVE-2026-129474, created_at 2026_11_19;)
+
+# --- CVE-2026-115560 post-patch signal: app tried a runtime serializer switch ---------
+# On 8.2.36/8.3.37/8.4.28/8.5.13 an ini_set()/session_start([...]) of any session.*
+# setting throws while upload progress is enabled. Seeing it in a response
+# means: upload progress is explicitly ON and the app relies on the vulnerable
+# runtime-switch pattern (check the same store for separate-config readers).
+alert http $HOME_NET $HTTP_PORTS -> $EXTERNAL_NET any (msg:"PHP-UP-2026-W2 CVE-2026-115560 post-patch: runtime session ini change rejected while upload_progress enabled"; flow:established,to_client; http.response_body; content:"cannot be changed at runtime when session.upload_progress.enabled is On"; classtype:misc-activity; sid:1000006228; rev:1; metadata:cve CVE-2026-115560, created_at 2026_11_19;)
+
+# ===== CVE-2026-129496 / 129538 / 129292 — tzcache UAF, php-cgi PATH_INFO, FPM status XSS =====
+# ------------------------------------------------------------------------
+# CyberOK — PHP-UP-2026 wave 2 (PHP 8.2.36 / 8.3.37 / 8.4.28 / 8.5.13, 2026-11-19)
+# SAPI / date: CVE-2026-129496, CVE-2026-129538, CVE-2026-129292
+#
+# (c) 2026 АО «Сайбер ОК» / JSC CyberOK
+# Материал предоставляется исключительно для ознакомительных и исследовательских целей.
+# Копирование, переработка, распространение, переопубликация и использование материала
+# полностью или частично в коммерческих целях, включая создание и продвижение
+# конкурирующих продуктов, запрещены без предварительного письменного разрешения
+# правообладателя.
+#
+# Provided for informational and research purposes only. Copying, modification,
+# distribution, republication, and use of this material in whole or in part for
+# commercial purposes, including the creation and promotion of competing products,
+# is prohibited without the prior written permission of the copyright holder.
+# ------------------------------------------------------------------------
+#
+# Suricata 7 rules. Local SID space 1000006240-1000006259. Alert-only.
+# Validated offline (suricata 7.0.3 -r pcap) against captured lab trigger traffic
+# AND benign traffic of the same shape.
+#
+# Detection philosophy
+#  * CVE-2026-129496 (tzcache UAF) is triggered by ANY early request diagnostic that PHP
+#    writes to a FILE error_log in a fresh worker. The advisory names max_input_vars; the
+#    lab proved six request shapes (GET/POST/COOKIE >1000 vars, multipart without boundary,
+#    POST Content-Length > post_max_size, >20 file parts). The request alone cannot tell
+#    whether the server has the startup precondition -> these rules are ATTEMPT/SURFACE
+#    signals; the 502 correlation rule (6246) is the impact signal.
+#  * CVE-2026-129538 (php-cgi PATH_INFO) depends on the server mapping, not on request
+#    bytes (the advisory's Apache shape is an ordinary "GET /news/x"). Only two shapes
+#    are network-visible: an exposed FastCGI listener, and very deep .php/ suffixes.
+#  * CVE-2026-129292 (FPM status XSS) is planted through the Basic-auth USERNAME or the
+#    script name. Rules fire on the planting request (both vulnerable and patched targets)
+#    and on a status page that DELIVERS raw markup (vulnerable targets / innerHTML consumers).
+
+# =====================================================================================
+# CVE-2026-129496 / GHSA-gr4f-wgx5-jpfv — DATEG(tzcache) use-after-free
+# =====================================================================================
+
+# >1000 input variables in the query string (default max_input_vars=1000).
+# Possessive group keeps PCRE linear; validated: 1001 vars fires, 50 vars does not.
+alert http $EXTERNAL_NET any -> $HOME_NET any (msg:"PHP-UP-2026-W2 CVE-2026-129496 query string with >1000 input variables (early request diagnostic, tzcache UAF trigger)"; flow:established,to_server; http.uri.raw; content:"?"; pcre:"/\?(?:[^&#]*+&){1000}/"; flowbits:set,phpup.w2.earlydiag; classtype:attempted-dos; sid:1000006240; rev:1; metadata:created_at 2026_11_19, cve CVE-2026-129496;)
+
+# >1000 urlencoded body variables (POST). Body inspection limit must cover the body
+# (libhtp request-body-limit default is enough for ~1000 short pairs).
+alert http $EXTERNAL_NET any -> $HOME_NET any (msg:"PHP-UP-2026-W2 CVE-2026-129496 urlencoded POST with >1000 input variables (tzcache UAF trigger)"; flow:established,to_server; http.method; content:"POST"; http.content_type; content:"application/x-www-form-urlencoded"; nocase; http.request_body; pcre:"/^(?:[^&]*+&){1000}/"; flowbits:set,phpup.w2.earlydiag; classtype:attempted-dos; sid:1000006241; rev:1; metadata:created_at 2026_11_19, cve CVE-2026-129496;)
+
+# >1000 cookie pairs (PHP counts every pair, repeated names included — "a=1; a=1; ..."
+# fits nginx's default 8k header buffer).
+alert http $EXTERNAL_NET any -> $HOME_NET any (msg:"PHP-UP-2026-W2 CVE-2026-129496 Cookie header with >1000 pairs (tzcache UAF trigger)"; flow:established,to_server; http.cookie; pcre:"/^(?:[^\x3b]*+\x3b){1000}/"; flowbits:set,phpup.w2.earlydiag; classtype:attempted-dos; sid:1000006242; rev:1; metadata:created_at 2026_11_19, cve CVE-2026-129496;)
+
+# multipart/form-data without a boundary parameter: PHP emits "Missing boundary" during
+# request startup. A few bytes are enough to crash a fresh php-cgi worker (lab, stock
+# allocator) — the cheapest trigger shape. Never produced by a conforming client.
+alert http $EXTERNAL_NET any -> $HOME_NET any (msg:"PHP-UP-2026-W2 CVE-2026-129496 multipart/form-data POST without boundary (early request diagnostic, tzcache UAF trigger)"; flow:established,to_server; http.method; content:"POST"; http.content_type; content:"multipart/form-data"; nocase; startswith; content:!"boundary="; nocase; flowbits:set,phpup.w2.earlydiag; classtype:attempted-dos; sid:1000006243; rev:1; metadata:created_at 2026_11_19, cve CVE-2026-129496;)
+
+# >20 file parts (max_file_uploads default; 21 chained content matches — PCRE counting
+# over variable-gap multipart units is unreliable, see October note) — "Maximum number of allowable file uploads
+# has been exceeded" is emitted before RINIT. Multi-file upload UIs can legitimately
+# exceed 20: tune or keep as low-priority.
+alert http $EXTERNAL_NET any -> $HOME_NET any (msg:"PHP-UP-2026-W2 CVE-2026-129496 multipart POST with >20 file parts (max_file_uploads diagnostic)"; flow:established,to_server; http.method; content:"POST"; http.content_type; content:"multipart/form-data"; nocase; http.request_body; content:"filename=|22|"; content:"filename=|22|"; distance:0; content:"filename=|22|"; distance:0; content:"filename=|22|"; distance:0; content:"filename=|22|"; distance:0; content:"filename=|22|"; distance:0; content:"filename=|22|"; distance:0; content:"filename=|22|"; distance:0; content:"filename=|22|"; distance:0; content:"filename=|22|"; distance:0; content:"filename=|22|"; distance:0; content:"filename=|22|"; distance:0; content:"filename=|22|"; distance:0; content:"filename=|22|"; distance:0; content:"filename=|22|"; distance:0; content:"filename=|22|"; distance:0; content:"filename=|22|"; distance:0; content:"filename=|22|"; distance:0; content:"filename=|22|"; distance:0; content:"filename=|22|"; distance:0; content:"filename=|22|"; distance:0; flowbits:set,phpup.w2.earlydiag; classtype:attempted-dos; sid:1000006244; rev:2; priority:3; metadata:created_at 2026_11_19, cve CVE-2026-129496;)
+
+# Input-variable nesting deeper than max_input_nesting_level (64). PHP only emits this
+# diagnostic when display_errors=Off (i.e. production) — then it qualifies like the others.
+alert http $EXTERNAL_NET any -> $HOME_NET any (msg:"PHP-UP-2026-W2 CVE-2026-129496 input variable nested >64 levels (early request diagnostic)"; flow:established,to_server; http.uri; content:"["; pcre:"/(?:\[[^\]&=#]{0,64}\]){65}/"; flowbits:set,phpup.w2.earlydiag; classtype:attempted-dos; sid:1000006247; rev:1; metadata:created_at 2026_11_19, cve CVE-2026-129496;)
+
+# Oversized Basic credential (advisory exploit chain: Basic decoding used to replace the
+# stale cache, header larger than nginx's default per-header limit). Basic credentials are
+# normally <200 bytes; Negotiate/Bearer are deliberately not matched.
+alert http $EXTERNAL_NET any -> $HOME_NET any (msg:"PHP-UP-2026-W2 CVE-2026-129496 oversized Authorization Basic credential (>1KB, exploit-chain shape)"; flow:established,to_server; http.request_header; content:"authorization|3a 20|basic "; nocase; startswith; isdataat:1024,relative; classtype:attempted-admin; sid:1000006245; rev:1; metadata:created_at 2026_11_19, cve CVE-2026-129496;)
+
+# Impact correlation: a 502/503/504 answering a request that carried an early-diagnostic
+# shape on the same flow = a worker died while starting that request (lab: every trigger on
+# a fresh vulnerable worker answered 502; patched answered 200).
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"PHP-UP-2026-W2 CVE-2026-129496 gateway error after early-diagnostic request (possible PHP worker crash)"; flow:established,to_client; flowbits:isset,phpup.w2.earlydiag; http.stat_code; pcre:"/^50[234]$/"; classtype:attempted-dos; sid:1000006246; rev:1; metadata:created_at 2026_11_19, cve CVE-2026-129496;)
+
+# =====================================================================================
+# CVE-2026-129538 / GHSA-5j3f-64r7-f564 — php-cgi PATH_INFO correction OOB read/write
+# =====================================================================================
+
+# FastCGI BEGIN_REQUEST(role=RESPONDER) arriving from outside: an exposed php-cgi / FPM
+# FastCGI listener lets the client set SCRIPT_FILENAME/PATH_INFO directly (and is a
+# critical exposure on its own). Port-agnostic. FP: legitimate cross-host FastCGI from
+# a front end that is not in $HOME_NET.
+alert tcp $EXTERNAL_NET any -> $HOME_NET any (msg:"PHP-UP-2026-W2 CVE-2026-129538 FastCGI BEGIN_REQUEST from external client (exposed FastCGI listener)"; flow:established,to_server; content:"|01 01|"; depth:2; byte_test:2,=,8,4; content:"|00 01|"; offset:8; depth:2; content:"|01 04|"; distance:6; within:2; classtype:policy-violation; sid:1000006250; rev:1; metadata:created_at 2026_11_19, cve CVE-2026-129538;)
+
+# FastCGI PARAMS where SCRIPT_FILENAME still carries a path suffix after ".php/" — the
+# "unsplit" mapping shape the fix_pathinfo walk-back has to correct. Useful on taps
+# between web tier and php-cgi tier; cannot distinguish php-cgi (affected) from FPM (not).
+alert tcp any any -> $HOME_NET any (msg:"PHP-UP-2026-W2 CVE-2026-129538 FastCGI SCRIPT_FILENAME with .php/ path suffix (unsplit mapping)"; flow:established,to_server; content:"|01 04|"; content:"SCRIPT_FILENAME"; pcre:"/SCRIPT_FILENAME[^\x00-\x1f]{0,1024}?\.php\/[^\x00-\x1f]/"; classtype:web-application-activity; sid:1000006251; rev:1; priority:3; metadata:created_at 2026_11_19, cve CVE-2026-129538;)
+
+# Very deep path suffix after a .php component (>=2048 bytes). Against an unsplit front
+# end the suffix length IS the out-of-bounds distance (lab: 7 KB suffix leaked heap bytes,
+# 60 KB suffix crashed the FastCGI listener). Benign PATH_INFO routes are far shorter.
+alert http $EXTERNAL_NET any -> $HOME_NET any (msg:"PHP-UP-2026-W2 CVE-2026-129538 request with >=2KB path suffix after .php (PATH_INFO underflow distance)"; flow:established,to_server; http.uri.raw; content:".php/"; nocase; pcre:"/\.php\/[^?#]{2048}/i"; classtype:web-application-attack; sid:1000006252; rev:1; metadata:created_at 2026_11_19, cve CVE-2026-129538;)
+
+# =====================================================================================
+# CVE-2026-129292 / GHSA-3mg3-cr28-46gc — FPM full-status XSS (method/user/script)
+# =====================================================================================
+
+# Basic-auth USERNAME (text before the first ':') containing < > or " — the planting
+# request. Fires against patched targets too (attempt detection). Passwords may contain
+# these characters legitimately and are not matched.
+alert http $EXTERNAL_NET any -> $HOME_NET any (msg:"PHP-UP-2026-W2 CVE-2026-129292 markup in HTTP Basic username (FPM status XSS planting)"; flow:established,to_server; http.request_header; content:"authorization|3a 20|basic "; nocase; startswith; base64_decode:bytes 96,relative; base64_data; pcre:"/^[^:]{0,63}[<>\x22]/"; classtype:web-application-attack; sid:1000006255; rev:1; metadata:created_at 2026_11_19, cve CVE-2026-129292;)
+
+# Markup in the requested .php script name (script-filename leg; recorded verbatim with
+# cgi.fix_pathinfo=0 even when the file does not exist). http.uri is percent-decoded.
+alert http $EXTERNAL_NET any -> $HOME_NET any (msg:"PHP-UP-2026-W2 CVE-2026-129292 markup in requested .php script name (FPM status XSS planting)"; flow:established,to_server; http.uri; content:"<"; pcre:"/^[^?]*<[a-z!\/][^?]*\.php(?:[\/?]|$)/i"; classtype:web-application-attack; sid:1000006256; rev:1; metadata:created_at 2026_11_19, cve CVE-2026-129292;)
+
+# The FPM full HTML/XML status page DELIVERING a raw tag inside a cell (only vulnerable
+# builds do this; patched ones escape). Usually internal operator traffic: deploy where
+# the status endpoint is observed. Matches on the status table header to stay specific.
+alert http any any -> any any (msg:"PHP-UP-2026-W2 CVE-2026-129292 FPM status page delivers raw markup in a process field (stored XSS served)"; flow:established,to_client; http.response_body; content:"<th>request method</th>"; content:"<th>user</th>"; pcre:"/<td>[^<]{0,63}<(?:svg|img|script|iframe|body|details|video|audio|math|style|input|form|object|embed|a|marquee|xmp|template|select|textarea)[\s\/>]/i"; classtype:web-application-attack; sid:1000006257; rev:1; metadata:created_at 2026_11_19, cve CVE-2026-129292;)
+
+# FPM full JSON status carrying markup in user/script/method. JSON escaping (patched) does
+# not neutralise HTML: the bundled status.html renders these fields with innerHTML
+# (tracked upstream separately as GHSA-q8fm-p8fx-h6r6) — residual risk on PATCHED builds.
+alert http any any -> any any (msg:"PHP-UP-2026-W2 CVE-2026-129292 FPM JSON status carries markup in user/script/method (innerHTML consumers)"; flow:established,to_client; http.response_body; content:"|22|processes|22 3a 5b|"; content:"|22|user|22 3a 22|"; pcre:"/\x22(?:user|script|request method)\x22:\x22(?:[^\x22\\<]|\\.){0,63}\x22?(?:<|\\u003c)[a-z!\/]/i"; classtype:web-application-attack; sid:1000006258; rev:2; priority:2; metadata:created_at 2026_11_19, cve CVE-2026-129292;)
+
+# ===== CVE-2026-129506 / 15353 / 129501 / 127960 / 128064 / 128090 / 129438 — SOAP, DOM, client-side, phar =====
+# ------------------------------------------------------------------------
+# CyberOK — PHP-UP-2026 wave 2 (PHP security release 2026-11-19): parsers & client-side
+#
+# (c) 2026 АО «Сайбер ОК» / JSC CyberOK
+# Материал предоставляется исключительно для ознакомительных и исследовательских целей.
+# Копирование, переработка, распространение, переопубликация и использование материала
+# полностью или частично в коммерческих целях, включая создание и продвижение
+# конкурирующих продуктов, запрещены без предварительного письменного разрешения
+# правообладателя.
+#
+# Provided for informational and research purposes only. Copying, modification,
+# distribution, republication, and use of this material in whole or in part for
+# commercial purposes, including the creation and promotion of competing products,
+# is prohibited without the prior written permission of the copyright holder.
+# ------------------------------------------------------------------------
+
+# Suricata 7 rules — PHP-UP-2026-W2 (parsers & client-side). Local SID space 1000006260-1000006279.
+# All rules are alert-only. Validated offline (suricata 7.0.3 -r) against loopback captures of
+# real trigger traffic (ASan php-fpm 8.2.35/8.2.36/8.5.12/8.5.13 behind nginx 1.24) and
+# same-shape benign traffic (per-rule fire / no-fire).
+#
+# Destination ports are "any": the http keyword binds to Suricata's protocol detection, not
+# to a port list, so SOAP endpoints and outbound fetches on non-standard ports are covered.
+#
+# Coverage limits (all rules): request bodies with Content-Encoding gzip/deflate (SoapServer
+# inflates them itself), traffic inside TLS that is not decrypted, and bodies beyond
+# libhtp request-body-limit / response-body-limit are not inspected by the content rules.
+
+# =========================================================================================
+# CVE-2026-129506 / GHSA-4646-p932-gw34 — SoapServer DTD-entity use-after-free.
+# SoapServer::handle() without an argument parses php://input via soap_xmlParseFile();
+# cleanup_xml_node() frees the DTD (and with it the internal-subset check) while an
+# attribute's entity-reference node still points at the entity content.
+# SOAP 1.1 (sec. 3) and SOAP 1.2 (part 1, sec. 5) forbid a DTD in a SOAP message, so ANY
+# DOCTYPE in a SOAP envelope is a policy violation; 1000006261 is the exploit-shape rule.
+# =========================================================================================
+
+# Any DOCTYPE inside a SOAP 1.1/1.2 envelope POST (content-type independent).
+# FP: very low — SOAP stacks never emit a DTD. Benign SOAP traffic and non-SOAP XML with a
+# DOCTYPE (SVG/XHTML uploads) were replayed without alerts.
+alert http $EXTERNAL_NET any -> $HOME_NET any (msg:"PHP-UP-2026-W2 CVE-2026-129506 DTD in SOAP envelope request (SOAP forbids DTD - SoapServer DTD-entity UAF surface)"; flow:established,to_server; http.method; content:"POST"; http.request_body; content:"<!DOCTYPE"; nocase; fast_pattern; pcre:"/(?:schemas\.xmlsoap\.org\/soap\/envelope|www\.w3\.org\/2003\/05\/soap-envelope)/R"; classtype:attempted-dos; sid:1000006260; rev:1; metadata:cve CVE-2026-129506, created_at 2026_11_19, ghsa GHSA-4646-p932-gw34;)
+
+# Exploit shape: internal-subset ENTITY declaration + a non-predefined entity reference used
+# inside an ATTRIBUTE value (e.g. SOAP-ENV:actor="&e;") in a SOAP envelope.
+# FP: none expected (DTD + custom entity in a SOAP envelope has no legitimate use).
+alert http $EXTERNAL_NET any -> $HOME_NET any (msg:"PHP-UP-2026-W2 CVE-2026-129506 SOAP envelope with DTD entity referenced from an attribute value (UAF trigger shape)"; flow:established,to_server; http.method; content:"POST"; http.request_body; content:"<!ENTITY"; nocase; fast_pattern; content:"Envelope"; distance:0; pcre:"/\s[\w.:-]+\s*=\s*(?:\x22[^\x22<]*&(?!(?:amp|lt|gt|quot|apos)\x3b|#)[A-Za-z_:][\w.:-]*\x3b|'[^'<]*&(?!(?:amp|lt|gt|quot|apos)\x3b|#)[A-Za-z_:][\w.:-]*\x3b)/R"; classtype:attempted-dos; sid:1000006261; rev:1; metadata:cve CVE-2026-129506, created_at 2026_11_19, ghsa GHSA-4646-p932-gw34;)
+
+# Evasion: UTF-16 (LE or BE) encoded DOCTYPE in a request to a SOAP endpoint (SOAPAction
+# header or application/soap+xml). libxml2 honours the BOM/encoding declaration.
+# FP: very low; UTF-16 SOAP is rare and a DTD in it is still forbidden.
+alert http $EXTERNAL_NET any -> $HOME_NET any (msg:"PHP-UP-2026-W2 CVE-2026-129506 UTF-16 encoded DOCTYPE in SOAP request (DTD filter evasion)"; flow:established,to_server; http.header; pcre:"/^(?:SOAPAction\x3a|Content-Type\x3a\s*application\/soap\+xml)/mi"; http.request_body; content:"!|00|D|00|O|00|C|00|T|00|Y|00|P|00|E"; nocase; classtype:attempted-dos; sid:1000006262; rev:1; metadata:cve CVE-2026-129506, created_at 2026_11_19, ghsa GHSA-4646-p932-gw34;)
+
+# Blind spot made visible: SOAP request with a compressed body. SoapServer::handle() inflates
+# Content-Encoding gzip/deflate itself, so body-content rules (this file, WAFs) see nothing.
+# Lab: a gzip-wrapped UAF trigger crashed the 8.2.35/8.5.12 workers through nginx.
+# FP: low-medium — some SOAP clients (e.g. SoapClient with SOAP_COMPRESSION_* + compression
+# of requests) legitimately compress; baseline before alerting on it.
+alert http $EXTERNAL_NET any -> $HOME_NET any (msg:"PHP-UP-2026-W2 CVE-2026-129506 compressed SOAP request body (Content-Encoding gzip/deflate hides DTD from inspection)"; flow:established,to_server; http.method; content:"POST"; http.header; content:"Content-Encoding|3a|"; nocase; pcre:"/^Content-Encoding\x3a\s*(?:x-)?(?:gzip|deflate)/mi"; pcre:"/^(?:SOAPAction\x3a|Content-Type\x3a\s*application\/soap\+xml)/mi"; classtype:policy-violation; sid:1000006263; rev:1; metadata:cve CVE-2026-129506, created_at 2026_11_19, ghsa GHSA-4646-p932-gw34;)
+
+# Client-side path: a WSDL carrying a DTD whose general entity is referenced from an attribute
+# value, served to anyone (PHP's WSDL download sends NO User-Agent by default, so the client
+# cannot be scoped; lab-verified). soap_xmlParseFile() is used for WSDL and imported schemas.
+# FP: low — WSDL namespace + DTD entity used in an attribute. XSD-only imports are NOT
+# covered (DTD-bearing XSDs such as W3C XMLSchema.xsd exist; too FP-prone to alert on).
+alert http any any -> $HOME_NET any (msg:"PHP-UP-2026-W2 CVE-2026-129506 WSDL with DTD entity referenced from an attribute value (SoapClient WSDL UAF trigger shape)"; flow:established,to_client; file.data; content:"<!ENTITY"; nocase; fast_pattern; pcre:"/\s[\w.:-]+\s*=\s*(?:\x22[^\x22<]*&(?!(?:amp|lt|gt|quot|apos)\x3b|#)[A-Za-z_:][\w.:-]*\x3b|'[^'<]*&(?!(?:amp|lt|gt|quot|apos)\x3b|#)[A-Za-z_:][\w.:-]*\x3b)/R"; content:"schemas.xmlsoap.org/wsdl"; classtype:attempted-dos; sid:1000006264; rev:1; metadata:cve CVE-2026-129506, created_at 2026_11_19, ghsa GHSA-4646-p932-gw34;)
+
+# =========================================================================================
+# CVE-2026-15353 / GHSA-q23r-hr55-xmpg — SOAP-ENC arraySize with no dimension.
+# calc_dimension_12() returns 0 for "", " ", "abc", "-": to_zval_array() then indexes pos[0]
+# of a zero-length allocation; every item lands on ONE key read from uninitialised heap
+# (lab: low 32 bits of a ZendMM free-slot pointer, echoed back to the client).
+# Matched on the attribute's LOCAL name (PHP ignores the namespace prefix here).
+# =========================================================================================
+
+# Request side: arraySize value without any digit or '*'.
+# FP: none expected — valid arraySize is "*", "N" or "N M ..." (SOAP 1.2 part 2, 3.1.6).
+alert http $EXTERNAL_NET any -> $HOME_NET any (msg:"PHP-UP-2026-W2 CVE-2026-15353 SOAP arraySize with no dimension in request (uninitialised heap read)"; flow:established,to_server; http.method; content:"POST"; http.request_body; content:"arraySize"; fast_pattern; pcre:"/arraySize\s*=\s*(?:\x22[^\x220-9*]*\x22|'[^'0-9*]*')/"; classtype:attempted-recon; sid:1000006265; rev:1; metadata:cve CVE-2026-15353, created_at 2026_11_19, ghsa GHSA-q23r-hr55-xmpg;)
+
+# Evasion of 1000006265: character/entity references inside arraySize (e.g. "&#97;").
+# FP: none expected.
+alert http $EXTERNAL_NET any -> $HOME_NET any (msg:"PHP-UP-2026-W2 CVE-2026-15353 SOAP arraySize containing character/entity reference (filter evasion)"; flow:established,to_server; http.method; content:"POST"; http.request_body; content:"arraySize"; fast_pattern; pcre:"/arraySize\s*=\s*(?:\x22[^\x22]*&|'[^']*&)/"; classtype:attempted-recon; sid:1000006266; rev:1; metadata:cve CVE-2026-15353, created_at 2026_11_19, ghsa GHSA-q23r-hr55-xmpg;)
+
+# Response side (malicious/compromised SOAP server, or a WSDL with wsdl:arraySize=""): any HTTP
+# response body carrying a no-dimension arraySize. Lab: SoapClient 8.2.35 decoded
+# {"-1257730024":"C"} from such a response, 8.2.36 ["A","B","C"]. (Scoping to the
+# "PHP-SOAP/" User-Agent is not possible: Suricata 7 rejects request+response buffer mixes.)
+alert http any any -> $HOME_NET any (msg:"PHP-UP-2026-W2 CVE-2026-15353 SOAP arraySize with no dimension in HTTP response (SoapClient uninitialised heap read)"; flow:established,to_client; file.data; content:"arraySize"; fast_pattern; pcre:"/arraySize\s*=\s*(?:\x22[^\x220-9*]*\x22|'[^'0-9*]*')/"; classtype:attempted-recon; sid:1000006267; rev:1; metadata:cve CVE-2026-15353, created_at 2026_11_19, ghsa GHSA-q23r-hr55-xmpg;)
+
+# =========================================================================================
+# CVE-2026-127960 / GHSA-mmf9-xm3v-hg2x — quadratic folded-header concatenation in the
+# http:// stream wrapper (client side; 8.2.28+/8.3.18+/8.4.5+/8.5.x). Lab: 400k
+# continuation lines (1.6 MB) = 5.4 s CPU on 8.2.35 vs 0.04 s on 8.2.36, and two such
+# fetches stalled a 2-worker FPM pool (unrelated request 5.05 s vs 0.006 s).
+# obs-fold is deprecated (RFC 9112 sec. 5.2); 100+ continuation lines in one response is
+# never legitimate. http.header.raw keeps the folded form (libhtp unfolds http.header).
+# =========================================================================================
+alert http any any -> $HOME_NET any (msg:"PHP-UP-2026-W2 CVE-2026-127960 HTTP response with 100+ obs-fold header continuation lines (PHP http wrapper CPU DoS)"; flow:established,to_client; http.header.raw; pcre:"/(?:\r\n[ \t][^\r\n]{0,256}){100}/"; classtype:attempted-dos; sid:1000006268; rev:1; metadata:cve CVE-2026-127960, created_at 2026_11_19, ghsa GHSA-mmf9-xm3v-hg2x;)
+
+# Raw-stream twin: a header block larger than stream.reassembly.depth (default 1 MB) never
+# completes for libhtp, so 1000006268 cannot fire on the multi-MB responses a real attacker
+# uses (lab: 1.6 MB header = 0 alerts from 1000006268 alone). This rule inspects the first
+# reassembled chunk of the response stream instead.
+# FP: very low (100 consecutive continuation lines). Cost: pcre on to_client stream chunks
+# that start with an HTTP status line.
+alert tcp any any -> $HOME_NET any (msg:"PHP-UP-2026-W2 CVE-2026-127960 HTTP response stream with 100+ obs-fold continuation lines (raw stream, oversized header block)"; flow:established,to_client,only_stream; content:"HTTP/1."; depth:7; pcre:"/(?:\r\n[ \t][^\r\n]{0,256}){100}/"; classtype:attempted-dos; sid:1000006269; rev:1; metadata:cve CVE-2026-127960, created_at 2026_11_19, ghsa GHSA-mmf9-xm3v-hg2x;)
+
+# =========================================================================================
+# CVE-2026-128064 / GHSA-f6gg-rchx-xw8j — HTTPS://, httpS://, FTPS:// silently use plaintext
+# (use_ssl tested scheme[4]=='s' / scheme[3]=='s'). NOTE: with no explicit port the
+# downgraded request goes to 80/21 and is indistinguishable from ordinary HTTP/FTP on the
+# wire — the host-hunt scanner (code/config literals) is the primary detector. These rules
+# only see (a) an explicit :443/:990 in the URL and (b) the observable redirect leg.
+# =========================================================================================
+
+# Cleartext HTTP request line sent to TCP/443 (generic downgrade/misconfiguration signal).
+# FP: low; HTTP-on-443 health checks or captive portals. Tune port list to your TLS services.
+alert tcp $HOME_NET any -> any 443 (msg:"PHP-UP-2026-W2 CVE-2026-128064 cleartext HTTP request sent to TCP/443 (TLS downgrade, e.g. PHP HTTPS:// scheme)"; flow:established,to_server; content:"HTTP/1."; fast_pattern; pcre:"/^(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS) \S{1,4096} HTTP\/1\.[01]\r\n/"; classtype:policy-violation; sid:1000006270; rev:1; metadata:cve CVE-2026-128064, created_at 2026_11_19, ghsa GHSA-f6gg-rchx-xw8j;)
+
+# Same, carrying credentials or a body (the confidentiality impact of the advisory).
+alert tcp $HOME_NET any -> any 443 (msg:"PHP-UP-2026-W2 CVE-2026-128064 cleartext HTTP request with Authorization/Cookie sent to TCP/443"; flow:established,to_server; content:"HTTP/1."; pcre:"/^(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS) \S{1,4096} HTTP\/1\.[01]\r\n/"; pcre:"/\r\n(?:Authorization|Proxy-Authorization|Cookie)\x3a/i"; classtype:credential-theft; sid:1000006271; rev:1; metadata:cve CVE-2026-128064, created_at 2026_11_19, ghsa GHSA-f6gg-rchx-xw8j;)
+
+# Cleartext HTTP request whose Host header names port 443 (any destination port: PHP keeps
+# the :443 from an explicit HTTPS://host:443/ URL when it wrongly picks plaintext).
+# FP: low; some proxies/clients send explicit :443 in Host over TLS only.
+alert http $HOME_NET any -> any any (msg:"PHP-UP-2026-W2 CVE-2026-128064 cleartext HTTP request with Host header port 443"; flow:established,to_server; http.host.raw; content:"|3a|443"; endswith; classtype:policy-violation; sid:1000006272; rev:1; metadata:cve CVE-2026-128064, created_at 2026_11_19, ghsa GHSA-f6gg-rchx-xw8j;)
+
+# Redirect leg: a plaintext HTTP response redirecting to a scheme whose final 'S' is
+# upper-case (HTTPS://, httpS://, FTPS://). Vulnerable PHP follows it IN CLEARTEXT and, on
+# 307/308, re-sends the POST body. Redirects issued inside TLS are invisible to this rule.
+# FP: very low; legitimate servers emit lower-case schemes.
+alert http any any -> $HOME_NET any (msg:"PHP-UP-2026-W2 CVE-2026-128064 HTTP redirect to upper-case-S HTTPS/FTPS scheme (PHP stream wrapper TLS downgrade)"; flow:established,to_client; http.location; pcre:"/^(?:[Hh][Tt][Tt][Pp]|[Ff][Tt][Pp])S\x3a\/\//"; classtype:policy-violation; sid:1000006273; rev:1; metadata:cve CVE-2026-128064, created_at 2026_11_19, ghsa GHSA-f6gg-rchx-xw8j;)
+
+# FTPS leg: cleartext USER/PASS to the implicit-FTPS port 990 (only when the URL names :990;
+# FTPS:// without a port downgrades on 21, where USER-before-AUTH is ordinary FTP).
+alert tcp $HOME_NET any -> any 990 (msg:"PHP-UP-2026-W2 CVE-2026-128064 cleartext FTP USER/PASS sent to TCP/990"; flow:established,to_server,only_stream; content:"USER "; depth:5; classtype:credential-theft; sid:1000006274; rev:1; metadata:cve CVE-2026-128064, created_at 2026_11_19, ghsa GHSA-f6gg-rchx-xw8j;)
