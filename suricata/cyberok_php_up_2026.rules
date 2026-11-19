@@ -27,7 +27,7 @@
 # --- CVE-2026-109618, vector A: multipart without a usable Content-Length -----
 # PHP's post_max_size check needs Content-Length; a chunked multipart POST
 # bypasses it while feeding the parser (advisory-confirmed vector).
-alert http $EXTERNAL_NET any -> $HOME_NET $HTTP_PORTS (msg:"PHP-UP-2026 CVE-2026-109618 chunked multipart POST (post_max_size bypass surface)"; flow:established,to_server; http.method; content:"POST"; http.header; content:"Content-Type|3a| multipart/form-data"; nocase; http.header; content:"Transfer-Encoding|3a| chunked"; nocase; http.header; content:!"Content-Length|3a|"; classtype:attempted-dos; sid:1000006101; rev:1; metadata:created_at 2026_10_21, cve CVE-2026-109618;)
+alert http $EXTERNAL_NET any -> $HOME_NET $HTTP_PORTS (msg:"PHP-UP-2026 CVE-2026-109618 chunked multipart POST (post_max_size bypass surface)"; flow:established,to_server; http.method; content:"POST"; http.header; content:"Content-Type|3a| multipart/form-data"; nocase; content:"Transfer-Encoding|3a| chunked"; nocase; content:!"Content-Length|3a|"; classtype:attempted-dos; sid:1000006101; rev:2; metadata:created_at 2026_10_21, cve CVE-2026-109618;)
 
 # --- CVE-2026-109618, vector B: part-header amplification ---------------------
 # A single multipart part carrying an abnormal number of headers: in-memory
@@ -100,7 +100,7 @@ alert http $EXTERNAL_NET any -> $HOME_NET $HTTP_PORTS (msg:"PHP-UP-2026 anomaly:
 # PHP session IDs use [a-zA-Z0-9,-] charset (default: 32 hex chars).
 # Values containing other characters (underscore, null, binary, etc.) are
 # crafted probes — the PortSwigger technique uses PHPSESSID=_ specifically.
-alert http $EXTERNAL_NET any -> $HOME_NET $HTTP_PORTS (msg:"PHP-UP-2026 invalid PHPSESSID cookie value (charset violation)"; flow:established,to_server; http.header; content:"PHPSESSID="; pcre:"/Cookie\x3a[^\r\n]*PHPSESSID=[^\s;\r\n]*[^a-zA-Z0-9,\-\s;\r\n]/"; classtype:web-application-attack; sid:1000006114; rev:1; metadata:created_at 2026_10_22, cve CVE-2026-109618;)
+alert http $EXTERNAL_NET any -> $HOME_NET $HTTP_PORTS (msg:"PHP-UP-2026 invalid PHPSESSID cookie value (charset violation)"; flow:established,to_server; http.cookie; content:"PHPSESSID="; pcre:"/(?:^|\x3b)\s*PHPSESSID=[^\s\x3b]*[^a-zA-Z0-9,\-\s\x3b]/"; classtype:web-application-attack; sid:1000006114; rev:2; metadata:created_at 2026_10_22, cve CVE-2026-109618;)
 
 # --- LFI trigger: session-file path in URI (ikow 2026106 + rafalohaki paths) ---
 # Every poisoning chain needs an application-level include/LFI that accepts
