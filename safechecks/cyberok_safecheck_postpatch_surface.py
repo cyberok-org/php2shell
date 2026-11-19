@@ -209,11 +209,15 @@ def check_form_sid(php_cli, docroot, sessdir, cleanup):
 def check_handler_mismatch(php_cli, docroot, sessdir):
     """Test 4: does the php handler decode php_serialize data destructively?"""
     # write a php_serialize-format session file
-    sid = "mismatch_check"
+    # session ids are limited to [a-zA-Z0-9,-]; with an "_" the files handler
+    # rejected the id ("illegal characters"), so the planted file was never read
+    sid = "mismatchcheck01"
     sess_path = os.path.join(sessdir, f"sess_{sid}")
     # php_serialize stores: a:1:{s:N:"key";s:M:"value";}
     # php handler would try to split at "|" and unserialize the value
-    payload = 'a:1:{s:34:"upload_progress_|O:4:"Evil":1:{}";a:0:{}}'
+    # well-formed php_serialize record whose key carries "|O:..." (32-byte key)
+    key = 'upload_progress_|O:4:"Evil":0:{}'
+    payload = 'a:1:{s:%d:"%s";a:0:{}}' % (len(key), key)
     with open(sess_path, "w") as f:
         f.write(payload)
 
