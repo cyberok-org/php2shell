@@ -15,6 +15,11 @@ A match identifies a known sample, public PoC content, or a suspicious pattern a
 | [iocs.json](iocs.json) | Two exact payload hashes, dated network indicators, paths, and public PoC markers with their roles and sources |
 | [test_hosthunt.py](test_hosthunt.py) | 25 offline regression tests using synthetic byte fixtures |
 | [validation.json](validation.json) | Recorded validation environment, result, and limitations |
+| [session_store_hunt.py](session_store_hunt.py) | Wave 2: `files` session-store triage for CVE-2026-126714 (spliced files) and CVE-2026-115560 (serializer-mismatch seeds) |
+| [log_hunt.py](log_hunt.py) | Wave 2: PHP error-log / php-fpm log patterns for CVE-2026-129481, 129182, 129474, 115560 and 126714 |
+| [php_wave2_code_hunt.py](php_wave2_code_hunt.py) | Wave 2: code/config triage for CVE-2026-128064, 129506, 129501, 127960 and 129438 |
+| [phar_pubkey_scan.py](phar_pubkey_scan.py) | Wave 2: phar archives with a `.pubkey` sidecar but a keyless signature (CVE-2026-128090) |
+| [test_hosthunt_d.py](test_hosthunt_d.py) + `fixtures/phar/` | Wave 2: 11 offline regression tests for the code hunt and phar scanner |
 
 Network indicators in `iocs.json` are leads for DNS, proxy, firewall, and process telemetry. The runner does not search every file for these IP addresses or domains.
 
@@ -88,6 +93,37 @@ Output includes `start`, `finding`, `skip`/`error`/`coverage`, and `summary` rec
 | `0` | `NO_MATCH_IN_SCANNED_SCOPE`. No claim that the host is uncompromised. |
 
 `incomplete: false` only describes the explicitly selected roots and scope. Deleted files, process memory, external session backends, and artifacts outside those roots remain outside coverage. PHP's normal upload-progress cleanup can remove evidence after the POST completes.
+
+## Wave 2 scanners (2026-11-19 release)
+
+Four read-only, stdlib-only scanners for the second PHP release. They read
+files; nothing is executed, deserialized or fetched. Exit codes: `0` nothing
+flagged, `1` findings, `2` usage or I/O error.
+
+```bash
+# Session store: splice seams (126714), cross-handler objects and
+# upload-progress seeds (115560). Default dirs: /var/lib/php/sessions, /tmp, ...
+python3 host-hunt/session_store_hunt.py /mnt/server/var/lib/php/sessions --json session-hunt.json
+
+# PHP error logs and php-fpm master logs:
+python3 host-hunt/log_hunt.py /mnt/server/var/log/php /mnt/server/var/log/php-fpm.log --json log-hunt.json
+
+# Application code and config: HTTPS:// / FTPS:// literals with an upper-case final S,
+# SoapServer::handle() without an argument, DOM saveXml(), user-fed file_get_contents():
+python3 host-hunt/php_wave2_code_hunt.py /mnt/server/var/www --min low --json > code-hunt.json
+
+# Phar archives with a .pubkey sidecar whose signature is keyless (MD5/SHA*) or missing:
+python3 host-hunt/phar_pubkey_scan.py /mnt/server/var/www /mnt/server/opt --json > phar-scan.json
+
+# Offline regression tests (code hunt + phar scanner, synthetic fixtures):
+python3 -m unittest -v test_hosthunt_d   # run from host-hunt/
+```
+
+`session_store_hunt.py` re-implements PHP's three session decoders in Python;
+`OBJECTS_PRESENT` (LOW) is normal for many applications, so baseline it. A
+finding marks a file for review, not proof of exploitation. `log_hunt.py`
+patterns come from lab runs on 8.5.12 vs 8.5.13 and 8.2.35 vs 8.2.36; benign
+crashes and memory-limit errors also match, so correlate with time and traffic.
 
 ## Relationship to Sigma and existing detections
 

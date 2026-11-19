@@ -132,3 +132,64 @@ alert http $HOME_NET $HTTP_PORTS -> $EXTERNAL_NET any (msg:"PHP-UP-2026 post-exp
 # on PHP_SESSION_UPLOAD_PROGRESS presence or specific class names.
 # Credit: Corelight SID 3000653 (adapted to our SID space)
 alert http $EXTERNAL_NET any -> $HOME_NET $HTTP_PORTS (msg:"PHP-UP-2026 serialized integer-key collision pattern (heap spray, ASLR bypass)"; flow:established,to_server; http.method; content:"POST"; http.request_body; content:"i:4294967296|3b|"; fast_pattern; content:"i:8589934592|3b|"; distance:0; within:48; content:"i:12884901888|3b|"; distance:0; within:48; classtype:attempted-admin; sid:1000006121; rev:1; metadata:created_at 2026_10_28, cve CVE-2026-109618, cve CVE-2026-109619;)
+
+# =========================================================================
+# WAVE 2 — 2026-11-19 security release (8.2.36 / 8.3.37 / 8.4.28 / 8.5.13)
+# CVE-2026-129289 (FPM request smuggling), CVE-2026-129538 (CGI PATH_INFO
+# underflow — the CVE-assigned form of CyberOK's October N1 finding),
+# CVE-2026-127960 (quadratic folded-header client DoS). SIDs 1000006130+.
+# =========================================================================
+
+# --- CVE-2026-129289: FastCGI record smuggled in an unread request body ------
+# If the app opens php://input without consuming it, request shutdown left
+# the FastCGI STDIN un-drained; with FCGI_KEEP_CONN (nginx fastcgi_keep_conn on)
+# the leftover body bytes were parsed as the next FastCGI record stream
+# (fix: "Drain unread request bodies"). CyberOK e2e (2026-11-19): the smuggled
+# BEGIN_REQUEST is EMBEDDED at an offset inside a larger multipart body (not at
+# offset 0), so the needle is id-agnostic and offset-agnostic: FCGI header
+# 01 01 <any id> 00 08 00 00 followed by role 00 01 (RESPONDER). Lab-validated
+# against real smuggled execution traffic on PHP-FPM 8.2.35 behind nginx.
+# rev:3 (review 2026-11-19): any method (PUT/PATCH + a single fread(php://input)
+# also carry the record), any non-zero version byte (FPM accepts version>=1) and
+# any padding/reserved byte (evasive framing); type=1, clen=8, role=RESPONDER.
+alert http $EXTERNAL_NET any -> $HOME_NET $HTTP_PORTS (msg:"PHP-UP-2026 W2 CVE-2026-129289 FastCGI BEGIN_REQUEST record embedded in HTTP request body (FPM smuggling)"; flow:established,to_server; http.request_body; content:"|00 08|"; content:"|00 01|"; distance:2; within:2; pcre:"/[\x01-\xff]\x01[\x00-\xff]{2}\x00\x08[\x00-\xff]{2}\x00\x01/s"; classtype:attempted-admin; sid:1000006130; rev:3; metadata:created_at 2026_11_19, cve CVE-2026-129289;)
+
+# --- CVE-2026-129538: CGI PATH_INFO underflow recon --------------------------
+# php-cgi with cgi.fix_pathinfo=1 re-derived PATH_INFO by subtracting the
+# suffix stripped from SCRIPT_FILENAME/PATH_TRANSLATED; a suffix LONGER than
+# PATH_INFO underflowed the pointer and echoed adjacent environment memory
+# (CyberOK-observed leak fragment: "US=1" out of REDIRECT_STATUS=1). Wire
+# shape of the probe: a .php script followed by an abnormally long suffix
+# segment. 512+ chars is well above framework-routing tails (CI-style
+# /index.php/<route> stays < 200); tune DOWN for recon-hungry deployments.
+# rev:2 (review 2026-11-19): count every byte up to "?"/"#", including "/": a
+# suffix split into /AAAA.../AAAA... segments underflows just as well and evaded
+# the old [A-Za-z0-9_~%.-]{512,} class (0 hits on a 7 KB, 34-slash probe).
+alert http $EXTERNAL_NET any -> $HOME_NET $HTTP_PORTS (msg:"PHP-UP-2026 W2 CVE-2026-129538 CGI PATH_INFO underflow probe (.php URI with 512+ char suffix)"; flow:established,to_server; http.uri; content:".php/"; fast_pattern; pcre:"/\.php\/[^?#]{512}/"; classtype:attempted-recon; sid:1000006131; rev:2; metadata:created_at 2026_11_19, cve CVE-2026-129538;)
+
+# --- CVE-2026-129538, vector B: newline in the URI suffix ---------------------
+# CyberOK e2e finding (2026-11-19): a %0A inside the suffix defeats nginx's
+# `fastcgi_split_path_info` regex (dot does not match newline — the
+# CVE-2019-11043 technique). In a split location WITHOUT a try_files/file-
+# existence check nginx falls back to passing the full URI and the underflow
+# triggers there too (with try_files $fastcgi_script_name =404 the lab stayed
+# clean) — not only on no-split configs (lab-confirmed:
+# /reflect.php/SH%0aORT -> PATH_INFO echo of adjacent param-storage memory on
+# stock php-cgi 8.3.6; patched 8.2.36 returns empty PATH_INFO). Short suffixes
+# suffice, so the 512+ rule above does NOT cover this vector.
+# Buffer note: http.uri is the NORMALIZED (percent-decoded) URI — the newline
+# arrives as a raw \x0a byte there, not as "%0a" (lab-verified on Suricata 7).
+alert http $EXTERNAL_NET any -> $HOME_NET $HTTP_PORTS (msg:"PHP-UP-2026 W2 CVE-2026-129538 CGI PATH_INFO underflow via newline in .php URI suffix (split-config bypass)"; flow:established,to_server; http.uri; pcre:"/\.php\/[^\x0a\x0d]{0,64}[\x0a\x0d]/"; classtype:attempted-recon; sid:1000006133; rev:2; metadata:created_at 2026_11_19, cve CVE-2026-129538;)
+
+# --- CVE-2026-127960: obs-fold continuation run in response headers ----------
+# PHP acting as an HTTP CLIENT (http:// wrapper, file_get_contents, etc.)
+# parsed folded response headers quadratically — a malicious server could
+# stall the client with a few MB of " SP"-continuation lines (fix: linear
+# smart_str accumulation). Fires on the RESPONSE side of outbound fetches.
+# Buffer note (Suricata 7): http.response_header normalises/unfolds
+# continuation lines, and http.response_header_raw does NOT exist in 7.0.x —
+# so the fold signature is matched on the RAW STREAM as a dense cluster:
+# five CRLF+SP occurrences each within 48 bytes of the previous (CyberOK
+# lab-validated on real fold-attack traffic; single CRLF-SP matches occur in
+# benign bodies, a 5x dense cluster does not — tune count/window per baseline).
+alert tcp $EXTERNAL_NET $HTTP_PORTS -> $HOME_NET any (msg:"PHP-UP-2026 W2 CVE-2026-127960 dense obs-fold continuation cluster in HTTP response (PHP client DoS)"; flow:established,to_client; content:"|0d 0a 20|"; content:"|0d 0a 20|"; distance:0; within:48; content:"|0d 0a 20|"; distance:0; within:48; content:"|0d 0a 20|"; distance:0; within:48; content:"|0d 0a 20|"; distance:0; within:48; classtype:attempted-dos; sid:1000006132; rev:2; metadata:created_at 2026_11_19, cve CVE-2026-127960;)
